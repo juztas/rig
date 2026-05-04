@@ -35,9 +35,16 @@ async def proxy(facility: str, path: str, request: Request) -> Response:
 
     authorization = request.headers.get("authorization")
     project = request.headers.get("x-project")
-    resolved_auth = await resolve_identity(authorization, facility, project, http_client, settings)
-
     user_identity = _extract_subject(authorization)
+    resolved_auth = await resolve_identity(
+        authorization,
+        facility,
+        project,
+        http_client,
+        settings,
+        user_identity=user_identity,
+    )
+
     if not await is_allowed(user_identity, facility, path, request.method, http_client, settings):
         return JSONResponse(status_code=403, content={"error": "Forbidden by policy"})
 
@@ -46,6 +53,7 @@ async def proxy(facility: str, path: str, request: Request) -> Response:
         upstream_headers["authorization"] = resolved_auth
 
     upstream_url = f"{facility_config.base_url.rstrip('/')}/{path.lstrip('/')}"
+    timeout = httpx.Timeout(facility_config.timeout, connect=10.0)
 
     t0 = time.monotonic()
     try:
@@ -55,6 +63,7 @@ async def proxy(facility: str, path: str, request: Request) -> Response:
             params=request.query_params.multi_items(),
             headers=upstream_headers,
             content=request.stream(),
+            timeout=timeout,
         )
         upstream_resp = await http_client.send(upstream_req, stream=True)
     except httpx.TimeoutException:

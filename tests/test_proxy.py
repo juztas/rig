@@ -5,6 +5,7 @@ import pytest
 from starlette.datastructures import Headers
 
 import rig.app as app_mod
+import rig.identity as identity_mod
 import rig.proxy as proxy_mod
 from rig.config import FacilityConfig, Settings
 from rig.headers import filter_request_headers, filter_response_headers
@@ -65,6 +66,57 @@ async def test_no_auth_passes_none():
     async with httpx.AsyncClient() as client:
         result = await resolve_identity(None, "nersc", None, client, settings)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_uses_precomputed_subject():
+    settings = Settings(facilities={}, vault_backend="kube")
+    async with httpx.AsyncClient() as client:
+        result = await resolve_identity(
+            "Bearer abc123",
+            "nersc",
+            "myproject",
+            client,
+            settings,
+            user_identity="cached-user",
+        )
+    assert result == "Bearer abc123"
+
+
+@pytest.mark.asyncio
+async def test_kube_client_initialized_once(monkeypatch):
+    calls = {"load": 0, "api_client": 0, "core_v1": 0}
+
+    class FakeApiClient:
+        pass
+
+    class FakeCoreV1Api:
+        def __init__(self, api_client):
+            self.api_client = api_client
+
+    async def fake_load_incluster_config():
+        calls["load"] += 1
+
+    def fake_api_client():
+        calls["api_client"] += 1
+        return FakeApiClient()
+
+    def fake_core_v1_api(api_client):
+        calls["core_v1"] += 1
+        return FakeCoreV1Api(api_client)
+
+    monkeypatch.setattr(identity_mod, "_kube_initialized", False)
+    monkeypatch.setattr(identity_mod, "_kube_api_client", None)
+    monkeypatch.setattr(identity_mod, "_kube_v1_api", None)
+    monkeypatch.setattr(identity_mod.k8s_config, "load_incluster_config", fake_load_incluster_config)
+    monkeypatch.setattr(identity_mod.k8s_client, "ApiClient", fake_api_client)
+    monkeypatch.setattr(identity_mod.k8s_client, "CoreV1Api", fake_core_v1_api)
+
+    first = await identity_mod._get_kube_v1_api()
+    second = await identity_mod._get_kube_v1_api()
+
+    assert first is second
+    assert calls == {"load": 1, "api_client": 1, "core_v1": 1}
 
 
 def test_extract_subject_from_jwt():
@@ -181,13 +233,20 @@ async def test_proxy_preserves_duplicate_query_params_and_resolved_auth(test_cli
     upstream = FakeUpstreamResponse(body=b'{"proxied": true}')
     recording_client = RecordingHttpClient(upstream)
     app.state.http_client = recording_client
+    seen = {"extract_calls": 0, "user_identity": None}
+
+    def fake_extract_subject(authorization):
+        seen["extract_calls"] += 1
+        return "user-123"
 
     async def fake_resolve_identity(*args, **kwargs):
+        seen["user_identity"] = kwargs.get("user_identity")
         return "Bearer resolved"
 
     async def fake_is_allowed(*args, **kwargs):
         return True
 
+    monkeypatch.setattr(proxy_mod, "_extract_subject", fake_extract_subject)
     monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
@@ -200,9 +259,40 @@ async def test_proxy_preserves_duplicate_query_params_and_resolved_auth(test_cli
     assert response.json() == {"proxied": True}
     assert recording_client.request_args["url"] == "https://upstream.example/api/echo"
     assert recording_client.request_args["params"] == [("a", "1"), ("a", "2"), ("b", "3")]
+    assert recording_client.request_args["timeout"] == httpx.Timeout(60.0, connect=10.0)
     assert recording_client.request_args["headers"]["authorization"] == "Bearer resolved"
     assert "x-request-id" in recording_client.request_args["headers"]
+    assert seen["extract_calls"] == 1
+    assert seen["user_identity"] == "user-123"
     assert upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_proxy_uses_facility_specific_timeout(test_client, monkeypatch):
+    client, app, proxy_mod = test_client
+    timeout_settings = Settings(
+        facilities={"test-facility": FacilityConfig(base_url="https://upstream.example/api/", timeout=12.5)}
+    )
+    monkeypatch.setattr(app_mod, "settings", timeout_settings)
+    monkeypatch.setattr(proxy_mod, "settings", timeout_settings)
+
+    upstream = FakeUpstreamResponse(body=b'{"proxied": true}')
+    recording_client = RecordingHttpClient(upstream)
+    app.state.http_client = recording_client
+
+    async def fake_resolve_identity(*args, **kwargs):
+        return "Bearer resolved"
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    response = await client.get("/rig/test-facility/echo")
+
+    assert response.status_code == 200
+    assert recording_client.request_args["timeout"] == httpx.Timeout(12.5, connect=10.0)
 
 
 @pytest.mark.asyncio
