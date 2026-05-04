@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rig
+  namespace: rig-smoke
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rig
+  namespace: rig-smoke
+  labels:
+    app: rig
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rig
+  template:
+    metadata:
+      labels:
+        app: rig
+    spec:
+      serviceAccountName: rig
+      containers:
+        - name: rig
+          image: rig:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: RIG_CONFIG_PATH
+              value: /etc/rig/config.yaml
+            - name: RIG_LOG_LEVEL
+              value: "INFO"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/rig
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: rig-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rig
+  namespace: rig-smoke
+spec:
+  selector:
+    app: rig
+  ports:
+    - port: 8000
+      targetPort: 8000

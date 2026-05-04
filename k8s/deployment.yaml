@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rig
+  namespace: rig
+  labels:
+    app: rig
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rig
+  template:
+    metadata:
+      labels:
+        app: rig
+    spec:
+      serviceAccountName: rig
+      containers:
+        - name: rig
+          image: rig:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: RIG_CONFIG_PATH
+              value: /etc/rig/config.yaml
+            - name: RIG_VAULT_BACKEND
+              value: "kube"
+            - name: RIG_VAULT_KUBE_NAMESPACE
+              value: "rig"
+            - name: RIG_LOG_LEVEL
+              value: "INFO"
+            - name: RIG_POLICY_ENGINE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rig-secrets
+                  key: RIG_POLICY_ENGINE_URL
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/rig
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: rig-config

@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rig-smoke-test
+  namespace: rig-smoke
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: curlimages/curl:8.8.0
+          command:
+            - sh
+            - -ec
+            - |
+              health="$(curl --retry 20 --retry-delay 3 --retry-connrefused -fsS http://rig:8000/health)"
+              echo "$health"
+              echo "$health" | grep '"status":"ok"'
+
+              ready="$(curl --retry 20 --retry-delay 3 --retry-connrefused -fsS http://rig:8000/ready)"
+              echo "$ready"
+              echo "$ready" | grep '"status":"ready"'
+              echo "$ready" | grep '"echo"'
+
+              proxy_body="$(curl --retry 20 --retry-delay 3 --retry-connrefused -fsS \
+                -H 'Authorization: Bearer smoke-token' \
+                -H 'X-Project: smoke-project' \
+                'http://rig:8000/rig/echo/ping?tag=a&tag=b')"
+              echo "$proxy_body"
+              test "$proxy_body" = "upstream-ok"

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rig-config
+  namespace: rig
+data:
+  config.yaml: |
+    facilities:
+      nersc:
+        base_url: "https://api.iri.nersc.gov/api/v1"
+        timeout: 60
+      esnet-east:
+        base_url: "https://iri-dev.ppg.es.net/api/v1"
+        timeout: 60
+      esnet-west:
+        base_url: "https://esnet-west.sdn-sense.net/api/v1"
+        timeout: 60
+      alcf:
+        base_url: "https://api.alcf.anl.gov/api/v1"
+        timeout: 60
+
+    max_connections: 1000
+    max_keepalive_connections: 100
+    default_timeout: 60
+    log_level: "INFO"
+    host: "0.0.0.0"
+    port: 8000
+    workers: 4
