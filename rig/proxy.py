@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.api_route(
-    "/rig/{facility}/{path:path}",
+    "/{facility}/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
 )
 async def proxy(facility: str, path: str, request: Request) -> Response:

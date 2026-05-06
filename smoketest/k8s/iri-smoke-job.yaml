@@ -35,7 +35,7 @@ spec:
               echo "$ready" | grep '"status":"ready"'
 
               echo "=== unknown facility returns 404 ==="
-              code="$(curl -o /dev/null -w '%{http_code}' -sS $RIG/rig/nonexistent/test)"
+              code="$(curl -o /dev/null -w '%{http_code}' -sS $RIG/nonexistent/test)"
               echo "status=$code"
               test "$code" = "404"
 
@@ -43,7 +43,7 @@ spec:
               resp="$(curl -sS -w '\n%{http_code}' \
                 -H "Authorization: $AUTH_JWT" \
                 -H 'X-Project: smoke' \
-                $RIG/rig/esnet-east/facility)"
+                $RIG/esnet-east/facility)"
               code="$(echo "$resp" | tail -1)"
               body="$(echo "$resp" | sed '$d')"
               echo "status=$code body=$body"
@@ -53,7 +53,7 @@ spec:
               resp="$(curl -sS -w '\n%{http_code}' \
                 -H "Authorization: $AUTH_JWT" \
                 -H 'X-Project: smoke' \
-                $RIG/rig/esnet-east/facility/sites)"
+                $RIG/esnet-east/facility/sites)"
               code="$(echo "$resp" | tail -1)"
               body="$(echo "$resp" | sed '$d')"
               echo "status=$code body=$body"
@@ -63,7 +63,7 @@ spec:
               resp="$(curl -sS -w '\n%{http_code}' \
                 -H "Authorization: $AUTH_JWT" \
                 -H 'X-Project: smoke' \
-                $RIG/rig/esnet-east/status/resources)"
+                $RIG/esnet-east/status/resources)"
               code="$(echo "$resp" | tail -1)"
               body="$(echo "$resp" | sed '$d')"
               echo "status=$code body=$body"
@@ -73,7 +73,7 @@ spec:
               resp="$(curl -sS -w '\n%{http_code}' \
                 -H "Authorization: $AUTH_JWT" \
                 -H 'X-Project: smoke' \
-                $RIG/rig/esnet-east/status/incidents)"
+                $RIG/esnet-east/status/incidents)"
               code="$(echo "$resp" | tail -1)"
               echo "status=$code"
               test "$code" = "200"
@@ -81,7 +81,7 @@ spec:
               echo "=== esnet-east: GET /facility (random token, pass-through) ==="
               resp="$(curl -sS -w '\n%{http_code}' \
                 -H "Authorization: $AUTH_RANDOM" \
-                $RIG/rig/esnet-east/facility)"
+                $RIG/esnet-east/facility)"
               code="$(echo "$resp" | tail -1)"
               body="$(echo "$resp" | sed '$d')"
               echo "status=$code body=$body"
@@ -91,7 +91,7 @@ spec:
               headers="$(curl -sS -D - -o /dev/null \
                 -H "Authorization: $AUTH_JWT" \
                 -H 'X-Project: smoke' \
-                $RIG/rig/esnet-east/facility)"
+                $RIG/esnet-east/facility)"
               echo "$headers"
               echo "$headers" | grep -i 'x-request-id'
               echo "$headers" | grep -i 'x-upstream-latency-ms'

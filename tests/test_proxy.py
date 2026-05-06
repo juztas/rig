@@ -222,7 +222,7 @@ async def test_ready_endpoint_returns_facilities(test_client):
 @pytest.mark.asyncio
 async def test_unknown_facility_returns_404(test_client):
     client, _, _ = test_client
-    response = await client.get("/rig/nonexistent/some/path")
+    response = await client.get("/nonexistent/some/path")
     assert response.status_code == 404
     assert "Unknown facility" in response.json()["error"]
 
@@ -251,7 +251,7 @@ async def test_proxy_preserves_duplicate_query_params_and_resolved_auth(test_cli
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
     response = await client.get(
-        "/rig/test-facility/echo?a=1&a=2&b=3",
+        "/test-facility/echo?a=1&a=2&b=3",
         headers={"authorization": "Bearer original", "x-project": "demo"},
     )
 
@@ -289,7 +289,7 @@ async def test_proxy_uses_facility_specific_timeout(test_client, monkeypatch):
     monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
-    response = await client.get("/rig/test-facility/echo")
+    response = await client.get("/test-facility/echo")
 
     assert response.status_code == 200
     assert recording_client.request_args["timeout"] == httpx.Timeout(12.5, connect=10.0)
@@ -305,6 +305,6 @@ async def test_proxy_denies_when_policy_rejects(test_client, monkeypatch):
 
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
-    response = await client.get("/rig/test-facility/secure")
+    response = await client.get("/test-facility/secure")
     assert response.status_code == 403
     assert response.json() == {"error": "Forbidden by policy"}

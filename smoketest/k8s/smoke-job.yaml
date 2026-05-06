@@ -27,6 +27,6 @@ spec:
               proxy_body="$(curl --retry 20 --retry-delay 3 --retry-connrefused -fsS \
                 -H 'Authorization: Bearer smoke-token' \
                 -H 'X-Project: smoke-project' \
-                'http://rig:8000/rig/echo/ping?tag=a&tag=b')"
+                'http://rig:8000/echo/ping?tag=a&tag=b')"
               echo "$proxy_body"
               test "$proxy_body" = "upstream-ok"

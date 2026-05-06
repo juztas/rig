@@ -44,7 +44,7 @@ echo "$ready" | grep -q '"status":"ready"'
 echo "$ready" | grep -q '"echo"'
 
 echo "=== unknown facility -> 404 ==="
-code="$(curl -o /dev/null -w '%{http_code}' -sS "$RIG/rig/nonexistent/test")"
+code="$(curl -o /dev/null -w '%{http_code}' -sS "$RIG/nonexistent/test")"
 echo "status=$code"
 test "$code" = "404"
 
@@ -52,7 +52,7 @@ echo "=== known user (jbalcas/smoke) -> token rewritten to smoke-vault-token ===
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
   -H 'X-Project: smoke' \
-  "$RIG/rig/echo/some/path?x=1")"
+  "$RIG/echo/some/path?x=1")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -66,7 +66,7 @@ echo "=== unknown user (stranger) -> pass-through (original JWT reaches upstream
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_STRANGER" \
   -H 'X-Project: smoke' \
-  "$RIG/rig/echo/another")"
+  "$RIG/echo/another")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -76,7 +76,7 @@ echo "$body" | grep -qF "\"authorization\": \"$JWT_STRANGER\""
 echo "=== known user but missing X-Project -> pass-through ==="
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
-  "$RIG/rig/echo/no-project")"
+  "$RIG/echo/no-project")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -88,7 +88,7 @@ echo "=== known user, wrong project -> pass-through ==="
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
   -H 'X-Project: not-smoke' \
-  "$RIG/rig/echo/wrong-proj")"
+  "$RIG/echo/wrong-proj")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -100,7 +100,7 @@ echo "=== proxy injects x-request-id and x-upstream-latency-ms ==="
 hdrs="$(curl -sS -D - -o /dev/null \
   -H "Authorization: $JWT_JBALCAS" \
   -H 'X-Project: smoke' \
-  "$RIG/rig/echo/headers-check")"
+  "$RIG/echo/headers-check")"
 echo "$hdrs" | grep -i -q '^x-request-id:'
 echo "$hdrs" | grep -i -q '^x-upstream-latency-ms:'
 
