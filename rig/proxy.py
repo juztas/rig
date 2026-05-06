@@ -17,6 +17,13 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+def _merge_forwarded_prefix(existing_prefix: str | None, facility: str) -> str:
+    """Append the selected facility to any existing forwarded prefix."""
+    prefix = (existing_prefix or "").split(",")[0].strip().rstrip("/")
+    facility_prefix = f"/{facility}"
+    return f"{prefix}{facility_prefix}" if prefix else facility_prefix
+
+
 @router.api_route(
     "/{facility}/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
@@ -51,6 +58,9 @@ async def proxy(facility: str, path: str, request: Request) -> Response:
         return JSONResponse(status_code=403, content={"error": "Forbidden by policy"})
 
     upstream_headers = filter_request_headers(request.headers, request_id=request_id)
+    upstream_headers["x-forwarded-host"] = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    upstream_headers["x-forwarded-proto"] = request.headers.get("x-forwarded-proto") or request.url.scheme
+    upstream_headers["x-forwarded-prefix"] = _merge_forwarded_prefix(request.headers.get("x-forwarded-prefix"), facility)
     if resolved_auth:
         upstream_headers["authorization"] = resolved_auth
 

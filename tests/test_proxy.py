@@ -12,6 +12,7 @@ from rig.headers import filter_request_headers, filter_response_headers
 from rig.identity import _extract_subject, _extract_subject_from_userinfo, resolve_identity
 from rig.policy import is_allowed
 from rig.app import app
+from rig.proxy import _merge_forwarded_prefix
 
 
 def test_hop_by_hop_stripped_from_request():
@@ -36,6 +37,11 @@ def test_host_stripped_from_request():
     out = filter_request_headers(headers, request_id="rid-2")
     assert "host" not in out
     assert out["accept"] == "application/json"
+
+
+def test_merge_forwarded_prefix_appends_facility():
+    assert _merge_forwarded_prefix(None, "esnet-east") == "/esnet-east"
+    assert _merge_forwarded_prefix("/proxy", "esnet-east") == "/proxy/esnet-east"
 
 
 def test_hop_by_hop_stripped_from_response():
@@ -269,6 +275,9 @@ async def test_proxy_preserves_duplicate_query_params_and_resolved_auth(test_cli
     assert recording_client.request_args["params"] == [("a", "1"), ("a", "2"), ("b", "3")]
     assert recording_client.request_args["timeout"] == httpx.Timeout(60.0, connect=10.0)
     assert recording_client.request_args["headers"]["authorization"] == "Bearer resolved"
+    assert recording_client.request_args["headers"]["x-forwarded-host"] == "test"
+    assert recording_client.request_args["headers"]["x-forwarded-proto"] == "http"
+    assert recording_client.request_args["headers"]["x-forwarded-prefix"] == "/test-facility"
     assert "x-request-id" in recording_client.request_args["headers"]
     assert seen["extract_calls"] == 1
     assert seen["user_identity"] == "user-123"
@@ -316,6 +325,7 @@ async def test_proxy_prefers_trusted_userinfo_header(test_client, monkeypatch):
     assert seen["userinfo_extract_calls"] == 1
     assert seen["jwt_extract_calls"] == 0
     assert seen["user_identity"] == "trusted-user"
+    assert recording_client.request_args["headers"]["x-forwarded-prefix"] == "/test-facility"
 
 
 @pytest.mark.asyncio
