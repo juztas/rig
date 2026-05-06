@@ -33,7 +33,7 @@ async def _get_kube_v1_api() -> Any:
         if _kube_v1_api is not None:
             return _kube_v1_api
         if not _kube_initialized:
-            await k8s_config.load_incluster_config()
+            k8s_config.load_incluster_config()
             _kube_initialized = True
         _kube_api_client = k8s_client.ApiClient()
         _kube_v1_api = k8s_client.CoreV1Api(_kube_api_client)
@@ -81,6 +81,7 @@ async def resolve_identity(
         if user and project:
             result = await _vault_lookup(user, project, facility, settings)
             if result is not None:
+                logger.info("Vault credential resolved, replacing upstream authorization", extra={"facility": facility, "user": user, "project": project})
                 return result
             logger.warning("Vault lookup failed, falling back to pass-through", extra={"facility": facility, "vault_backend": settings.vault_backend})
         elif not user:
@@ -97,11 +98,13 @@ async def _vault_lookup(
     facility: str,
     settings: Settings,
 ) -> str | None:
-    """Dispatch to the configured vault backend (kube or aws)."""
+    """Dispatch to the configured vault backend (kube, aws, or docker)."""
     if settings.vault_backend == "kube":
         return await _vault_kube(user, project, facility, settings)
     elif settings.vault_backend == "aws":
         return await _vault_aws(user, project, facility, settings)
+    elif settings.vault_backend == "docker":
+        return await _vault_docker(user, project, facility, settings)
     else:
         logger.error("Unknown vault_backend: %s", settings.vault_backend)
         return None
@@ -120,6 +123,7 @@ async def _vault_kube(
         secret = await v1.read_namespaced_secret(secret_name, settings.vault_kube_namespace)
         if secret.data and "token" in secret.data:
             token = base64.b64decode(secret.data["token"]).decode()
+            logger.debug("Read token from kube secret %s", secret_name)
             return f"Bearer {token}" if not token.startswith("Bearer ") else token
         logger.warning("Kube secret %s has no 'token' key", secret_name)
     except Exception:
@@ -152,4 +156,22 @@ async def _vault_aws(
             return f"Bearer {token}" if not token.startswith("Bearer ") else token
     except Exception:
         logger.exception("AWS Secrets Manager lookup failed for %s", secret_id)
+    return None
+
+
+async def _vault_docker(
+    user: str,
+    project: str,
+    facility: str,
+    settings: Settings,
+) -> str | None:
+    """Read a facility credential from the in-config docker_credentials map (local testing only)."""
+    token = settings.docker_credentials.get(user, {}).get(project, {}).get(facility)
+    if token:
+        logger.debug("Read token from docker credentials for user=%s project=%s facility=%s", user, project, facility)
+        return f"Bearer {token}" if not token.startswith("Bearer ") else token
+    logger.warning(
+        "No docker credential found",
+        extra={"user": user, "project": project, "facility": facility},
+    )
     return None

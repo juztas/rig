@@ -32,10 +32,12 @@ class Settings(BaseSettings):
     workers: int = 4
     log_level: str = "INFO"
 
-    vault_backend: str = ""  # "kube" or "aws" — empty disables vault lookup
+    vault_backend: str = ""  # "kube", "aws", or "docker" — empty disables vault lookup
     vault_kube_namespace: str = "default"
     vault_aws_region: str = "us-east-1"
     vault_secret_prefix: str = "rig-creds"  # k8s: {prefix}-{user}-{project}-{facility}, AWS: {prefix}/{user}/{project}/{facility}
+    # docker backend: flat credential map for local testing — user -> project -> facility -> token
+    docker_credentials: dict[str, dict[str, dict[str, str]]] = {}
     policy_engine_url: str = ""
 
 

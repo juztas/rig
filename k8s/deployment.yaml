@@ -6,7 +6,7 @@ metadata:
   labels:
     app: rig
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: rig
@@ -18,7 +18,8 @@ spec:
       serviceAccountName: rig
       containers:
         - name: rig
-          image: rig:latest
+          image: quay.io/amscesnet/rig:dev
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
@@ -29,7 +30,7 @@ spec:
             - name: RIG_VAULT_KUBE_NAMESPACE
               value: "rig"
             - name: RIG_LOG_LEVEL
-              value: "INFO"
+              value: "DEBUG"
             - name: RIG_POLICY_ENGINE_URL
               valueFrom:
                 secretKeyRef:
@@ -40,25 +41,30 @@ spec:
             - name: config
               mountPath: /etc/rig
               readOnly: true
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /health
               port: 8000
             initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /ready
               port: 8000
-            initialDelaySeconds: 5
             periodSeconds: 10
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "1"
+              cpu: 500m
               memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
       volumes:
         - name: config
           configMap:

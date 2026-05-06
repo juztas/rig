@@ -19,3 +19,15 @@ log_level: "INFO"
 host: "0.0.0.0"
 port: 8000
 workers: 4
+
+# Docker / local-testing credential store.
+# Set vault_backend: docker to enable. Tokens are looked up by user -> project -> facility.
+# vault_backend: docker
+# docker_credentials:
+#   alice:
+#     project1:
+#       nersc: "nersc_token_for_alice"
+#       esnet-east: "esnet_east_token_for_alice"
+#   bob:
+#     project2:
+#       nersc: "nersc_token_for_bob"

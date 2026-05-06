@@ -1,0 +1,99 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rig-iri-smoke
+  namespace: rig
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: curlimages/curl:8.8.0
+          command:
+            - sh
+            - -ec
+            - |
+              RIG="http://rig.rig.svc.cluster.local:8000"
+              RETRY="--retry 10 --retry-delay 3 --retry-connrefused"
+
+              # JWT with sub=jbalcas (header.payload.signature, unsigned smoke token)
+              # payload: {"sub":"jbalcas","iss":"rig-smoke","exp":4102444800}
+              AUTH_JWT="Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJqYmFsY2FzIiwiaXNzIjoicmlnLXNtb2tlIiwiZXhwIjo0MTAyNDQ0ODAwfQ."
+              AUTH_RANDOM="Bearer not-a-valid-jwt-token-$(date +%s)"
+
+              echo "=== health ==="
+              health="$(curl $RETRY -fsS $RIG/health)"
+              echo "$health"
+              echo "$health" | grep '"status":"ok"'
+
+              echo "=== readiness ==="
+              ready="$(curl $RETRY -fsS $RIG/ready)"
+              echo "$ready"
+              echo "$ready" | grep '"status":"ready"'
+
+              echo "=== unknown facility returns 404 ==="
+              code="$(curl -o /dev/null -w '%{http_code}' -sS $RIG/rig/nonexistent/test)"
+              echo "status=$code"
+              test "$code" = "404"
+
+              echo "=== esnet-east: GET /facility (JWT auth, sub=jbalcas) ==="
+              resp="$(curl -sS -w '\n%{http_code}' \
+                -H "Authorization: $AUTH_JWT" \
+                -H 'X-Project: smoke' \
+                $RIG/rig/esnet-east/facility)"
+              code="$(echo "$resp" | tail -1)"
+              body="$(echo "$resp" | sed '$d')"
+              echo "status=$code body=$body"
+              test "$code" = "200"
+
+              echo "=== esnet-east: GET /facility/sites (JWT auth, sub=jbalcas) ==="
+              resp="$(curl -sS -w '\n%{http_code}' \
+                -H "Authorization: $AUTH_JWT" \
+                -H 'X-Project: smoke' \
+                $RIG/rig/esnet-east/facility/sites)"
+              code="$(echo "$resp" | tail -1)"
+              body="$(echo "$resp" | sed '$d')"
+              echo "status=$code body=$body"
+              test "$code" = "200"
+
+              echo "=== esnet-east: GET /status/resources (JWT auth, sub=jbalcas) ==="
+              resp="$(curl -sS -w '\n%{http_code}' \
+                -H "Authorization: $AUTH_JWT" \
+                -H 'X-Project: smoke' \
+                $RIG/rig/esnet-east/status/resources)"
+              code="$(echo "$resp" | tail -1)"
+              body="$(echo "$resp" | sed '$d')"
+              echo "status=$code body=$body"
+              test "$code" = "200"
+
+              echo "=== esnet-east: GET /status/incidents (JWT auth, sub=jbalcas) ==="
+              resp="$(curl -sS -w '\n%{http_code}' \
+                -H "Authorization: $AUTH_JWT" \
+                -H 'X-Project: smoke' \
+                $RIG/rig/esnet-east/status/incidents)"
+              code="$(echo "$resp" | tail -1)"
+              echo "status=$code"
+              test "$code" = "200"
+
+              echo "=== esnet-east: GET /facility (random token, pass-through) ==="
+              resp="$(curl -sS -w '\n%{http_code}' \
+                -H "Authorization: $AUTH_RANDOM" \
+                $RIG/rig/esnet-east/facility)"
+              code="$(echo "$resp" | tail -1)"
+              body="$(echo "$resp" | sed '$d')"
+              echo "status=$code body=$body"
+              test "$code" = "200"
+
+              echo "=== esnet-east: proxy headers ==="
+              headers="$(curl -sS -D - -o /dev/null \
+                -H "Authorization: $AUTH_JWT" \
+                -H 'X-Project: smoke' \
+                $RIG/rig/esnet-east/facility)"
+              echo "$headers"
+              echo "$headers" | grep -i 'x-request-id'
+              echo "$headers" | grep -i 'x-upstream-latency-ms'
+
+              echo "ALL CHECKS PASSED"

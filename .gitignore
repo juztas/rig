@@ -16,6 +16,7 @@ venv/
 .env.*
 *.pem
 *.key
+config.docker.yaml
 
 # Local OS/editor noise
 .DS_Store
