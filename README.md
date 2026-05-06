@@ -26,7 +26,7 @@ curl http://localhost:8000/health
 curl http://localhost:8000/ready
 
 # proxy a request to NERSC
-curl http://localhost:8000/rig/nersc/compute/jobs \
+curl http://localhost:8000/nersc/compute/jobs \
   -H "Authorization: Bearer <token>" \
   -H "X-Project: m3795"
 ```
@@ -36,7 +36,7 @@ curl http://localhost:8000/rig/nersc/compute/jobs \
 ```
 rig/
   app.py        FastAPI app, httpx client lifespan, health endpoints
-  proxy.py      Wildcard route /rig/{facility}/{path:path}
+  proxy.py      Wildcard route /{facility}/{path:path}
   identity.py   Pass-through or vault-backed identity resolution
   policy.py     Per-request authorization (stub)
   config.py     pydantic-settings + YAML config loader
@@ -122,7 +122,8 @@ workers: 4
 | `port` | `RIG_PORT` | `8000` | Bind port |
 | `workers` | `RIG_WORKERS` | `4` | Number of uvicorn worker processes |
 | `log_level` | `RIG_LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
-| `vault_backend` | `RIG_VAULT_BACKEND` | `""` | Vault backend: `kube` or `aws` |
+| `vault_backend` | `RIG_VAULT_BACKEND` | `""` | Vault backend: `docker`, `kube`, or `aws` |
+| `docker_credentials` | `RIG_DOCKER_CREDENTIALS` (JSON) | `{}` | Local test credential map: `user -> project -> facility -> token` |
 | `vault_kube_namespace` | `RIG_VAULT_KUBE_NAMESPACE` | `default` | Kubernetes namespace for secret lookup |
 | `vault_aws_region` | `RIG_VAULT_AWS_REGION` | `us-east-1` | AWS region for Secrets Manager |
 | `vault_secret_prefix` | `RIG_VAULT_SECRET_PREFIX` | `rig-creds` | Prefix for secret names |
@@ -146,9 +147,10 @@ No configuration required. This is the default when no vault backend is set.
 
 ### Tier 2 -- Vaulted Credentials
 
-Pre-stored, per-user, per-project, per-facility credentials retrieved from
-Kubernetes Secrets or AWS Secrets Manager. This is for facilities that do not
-support federated tokens and require locally provisioned credentials.
+Pre-stored, per-user, per-project, per-facility credentials retrieved from a
+local Docker config file, Kubernetes Secrets, or AWS Secrets Manager. This is
+for facilities that do not support federated tokens and require locally
+provisioned credentials.
 
 RIG extracts the user identity from the JWT `sub` claim in the `Authorization`
 header (decoded without verification -- Kong has already verified the token).
@@ -156,6 +158,69 @@ The project is read from the `X-Project` request header.
 
 Both **user** and **project** must be present for vault lookup to proceed. If
 either is missing, RIG logs a warning and falls back to pass-through.
+
+#### Storing Tokens in a Local Docker Config File
+
+Enable with:
+
+```yaml
+vault_backend: docker
+```
+
+This backend is intended for local testing only. Define credentials in your
+`config.yaml` or a separate file such as `config.docker.yaml`, then run RIG
+with `RIG_CONFIG_PATH=config.docker.yaml`.
+
+The credential map is:
+
+```text
+docker_credentials.{user}.{project}.{facility} = "<bearer-token>"
+```
+
+- `user` must match the JWT `sub` claim from the incoming `Authorization` header.
+- `project` must match the incoming `X-Project` header.
+- `facility` must be one of your configured facilities, for example `nersc`,
+  `esnet-east`, `esnet-west`, or `alcf`.
+
+Example:
+
+```yaml
+facilities:
+  nersc:
+    base_url: "https://api.iri.nersc.gov/api/v1"
+    timeout: 60
+  esnet-east:
+    base_url: "https://iri-dev.ppg.es.net/api/v1"
+    timeout: 60
+  esnet-west:
+    base_url: "https://esnet-west.sdn-sense.net/api/v1"
+    timeout: 60
+  alcf:
+    base_url: "https://api.alcf.anl.gov/api/v1"
+    timeout: 60
+
+vault_backend: docker
+docker_credentials:
+  alice:
+    m3795:
+      nersc: "alice_nersc_token"
+      esnet-east: "alice_esnet_east_token"
+      esnet-west: "alice_esnet_west_token"
+      alcf: "alice_alcf_token"
+  bob:
+    irisandbox:
+      nersc: "bob_nersc_token"
+      esnet-east: "bob_esnet_east_token"
+      esnet-west: "bob_esnet_west_token"
+      alcf: "bob_alcf_token"
+```
+
+With that config:
+
+- Requests from JWT subject `alice` with `X-Project: m3795` use Alice's facility token.
+- Requests from JWT subject `bob` with `X-Project: irisandbox` use Bob's facility token.
+- If a matching user, project, or facility entry is missing, RIG falls back to
+  pass-through and forwards the original `Authorization` header.
 
 #### Storing Tokens in Kubernetes Secrets
 
@@ -351,7 +416,7 @@ Incoming request
 ### Proxy Route
 
 ```
-{GET,HEAD,OPTIONS,POST,PUT,DELETE,PATCH} /rig/{facility}/{path:path}
+{GET,HEAD,OPTIONS,POST,PUT,DELETE,PATCH} /{facility}/{path:path}
 ```
 
 All methods, all paths. RIG does not inspect or validate the downstream path --
@@ -368,18 +433,18 @@ it forwards whatever the client sends.
 
 ```bash
 # List compute jobs at NERSC
-curl http://rig:8000/rig/nersc/compute/jobs \
+curl http://rig:8000/nersc/compute/jobs \
   -H "Authorization: Bearer <token>"
 
 # Submit a job at ESnet-East with project context
-curl -X POST http://rig:8000/rig/esnet-east/compute/jobs \
+curl -X POST http://rig:8000/esnet-east/compute/jobs \
   -H "Authorization: Bearer <token>" \
   -H "X-Project: m3795" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-job", "script": "#!/bin/bash\necho hello"}'
 
 # List files at ALCF
-curl http://rig:8000/rig/alcf/filesystem/ls?path=/home/alice \
+curl http://rig:8000/alcf/filesystem/ls?path=/home/alice \
   -H "Authorization: Bearer <token>"
 ```
 
