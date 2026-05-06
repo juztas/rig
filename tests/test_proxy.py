@@ -94,7 +94,7 @@ async def test_kube_client_initialized_once(monkeypatch):
         def __init__(self, api_client):
             self.api_client = api_client
 
-    async def fake_load_incluster_config():
+    def fake_load_incluster_config():
         calls["load"] += 1
 
     def fake_api_client():
