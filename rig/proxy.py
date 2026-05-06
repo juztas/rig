@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import settings
 from .headers import filter_request_headers, filter_response_headers
-from .identity import resolve_identity, _extract_subject
+from .identity import TRUSTED_USERINFO_HEADER, _extract_subject, _extract_subject_from_userinfo, resolve_identity
 from .logging import get_logger, request_id_var
 from .policy import is_allowed
 
@@ -35,7 +35,9 @@ async def proxy(facility: str, path: str, request: Request) -> Response:
 
     authorization = request.headers.get("authorization")
     project = request.headers.get("x-project")
-    user_identity = _extract_subject(authorization)
+    user_identity = _extract_subject_from_userinfo(request.headers.get(TRUSTED_USERINFO_HEADER))
+    if user_identity is None:
+        user_identity = _extract_subject(authorization)
     resolved_auth = await resolve_identity(
         authorization,
         facility,

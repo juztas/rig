@@ -9,7 +9,7 @@ import rig.identity as identity_mod
 import rig.proxy as proxy_mod
 from rig.config import FacilityConfig, Settings
 from rig.headers import filter_request_headers, filter_response_headers
-from rig.identity import _extract_subject, resolve_identity
+from rig.identity import _extract_subject, _extract_subject_from_userinfo, resolve_identity
 from rig.policy import is_allowed
 from rig.app import app
 
@@ -126,6 +126,14 @@ def test_extract_subject_from_jwt():
     payload = base64.urlsafe_b64encode(json.dumps({"sub": "user42"}).encode()).rstrip(b"=").decode()
     token = f"Bearer header.{payload}.sig"
     assert _extract_subject(token) == "user42"
+
+
+def test_extract_subject_from_userinfo():
+    import base64
+    import json
+
+    payload = base64.b64encode(json.dumps({"sub": "userinfo-user"}).encode()).decode()
+    assert _extract_subject_from_userinfo(payload) == "userinfo-user"
 
 
 @pytest.mark.asyncio
@@ -265,6 +273,49 @@ async def test_proxy_preserves_duplicate_query_params_and_resolved_auth(test_cli
     assert seen["extract_calls"] == 1
     assert seen["user_identity"] == "user-123"
     assert upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_proxy_prefers_trusted_userinfo_header(test_client, monkeypatch):
+    client, app, proxy_mod = test_client
+    upstream = FakeUpstreamResponse(body=b'{"proxied": true}')
+    recording_client = RecordingHttpClient(upstream)
+    app.state.http_client = recording_client
+    seen = {"jwt_extract_calls": 0, "userinfo_extract_calls": 0, "user_identity": None}
+
+    def fake_extract_subject_from_userinfo(userinfo):
+        seen["userinfo_extract_calls"] += 1
+        return "trusted-user"
+
+    def fake_extract_subject(authorization):
+        seen["jwt_extract_calls"] += 1
+        return "jwt-user"
+
+    async def fake_resolve_identity(*args, **kwargs):
+        seen["user_identity"] = kwargs.get("user_identity")
+        return "Bearer resolved"
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "_extract_subject_from_userinfo", fake_extract_subject_from_userinfo)
+    monkeypatch.setattr(proxy_mod, "_extract_subject", fake_extract_subject)
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    response = await client.get(
+        "/test-facility/echo",
+        headers={
+            "authorization": "Bearer opaque-token",
+            "x-project": "demo",
+            "x-userinfo": "encoded-userinfo",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["userinfo_extract_calls"] == 1
+    assert seen["jwt_extract_calls"] == 0
+    assert seen["user_identity"] == "trusted-user"
 
 
 @pytest.mark.asyncio

@@ -152,9 +152,11 @@ local Docker config file, Kubernetes Secrets, or AWS Secrets Manager. This is
 for facilities that do not support federated tokens and require locally
 provisioned credentials.
 
-RIG extracts the user identity from the JWT `sub` claim in the `Authorization`
-header (decoded without verification -- Kong has already verified the token).
-The project is read from the `X-Project` request header.
+When RIG runs behind Kong, it first extracts user identity from Kong's trusted
+`X-Userinfo` header and uses that header's `sub` claim for vault lookup. If
+`X-Userinfo` is absent, RIG falls back to extracting `sub` from a Bearer JWT in
+the `Authorization` header (decoded without verification -- Kong has already
+verified the token). The project is read from the `X-Project` request header.
 
 Both **user** and **project** must be present for vault lookup to proceed. If
 either is missing, RIG logs a warning and falls back to pass-through.
@@ -177,7 +179,9 @@ The credential map is:
 docker_credentials.{user}.{project}.{facility} = "<bearer-token>"
 ```
 
-- `user` must match the JWT `sub` claim from the incoming `Authorization` header.
+- `user` must match the trusted `sub` claim from Kong's `X-Userinfo` header.
+- If Kong is not in front of RIG, `user` falls back to the JWT `sub` claim in
+  the incoming `Authorization` header.
 - `project` must match the incoming `X-Project` header.
 - `facility` must be one of your configured facilities, for example `nersc`,
   `esnet-east`, `esnet-west`, or `alcf`.

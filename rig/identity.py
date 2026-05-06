@@ -16,6 +16,8 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
+TRUSTED_USERINFO_HEADER = "x-userinfo"
+
 _kube_init_lock = asyncio.Lock()
 _kube_initialized = False
 _kube_api_client: Any | None = None
@@ -64,6 +66,22 @@ def _extract_subject(authorization: str | None) -> str | None:
         data = json.loads(base64.urlsafe_b64decode(payload))
         return data.get("sub")
     except Exception:
+        return None
+
+
+def _extract_subject_from_userinfo(userinfo_header: str | None) -> str | None:
+    """Extract the trusted user subject from Kong's base64-encoded X-Userinfo header."""
+    if not userinfo_header:
+        return None
+    try:
+        padding = 4 - (len(userinfo_header) % 4)
+        if padding < 4:
+            userinfo_header += "=" * padding
+        decoded = base64.b64decode(userinfo_header).decode("utf-8")
+        data = json.loads(decoded)
+        return data.get("sub")
+    except Exception:
+        logger.exception("Failed to parse trusted X-Userinfo header")
         return None
 
 
