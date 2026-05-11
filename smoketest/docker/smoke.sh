@@ -61,6 +61,10 @@ test "$code" = "200"
 # echo upstream returns the request as JSON, including the rewritten Authorization header
 echo "$body" | grep -q '"authorization": "Bearer smoke-vault-token"'
 echo "$body" | grep -q '"path": "/some/path"'
+# RFC Section 3C mandatory traceability headers
+echo "$body" | grep -q '"x-amsc-user": "jbalcas"'
+echo "$body" | grep -q '"x-amsc-project": "smoke"'
+echo "$body" | grep -q '"x-amsc-trace-id":'
 
 echo "=== unknown user (stranger) -> pass-through (original JWT reaches upstream) ==="
 resp="$(curl -sS -w '\n%{http_code}' \
@@ -73,16 +77,17 @@ echo "status=$code"
 test "$code" = "200"
 echo "$body" | grep -qF "\"authorization\": \"$JWT_STRANGER\""
 
-echo "=== known user but missing X-Project -> pass-through ==="
+echo "=== known user but missing X-Project -> 400 (tier-3 fail-closed, ZT-REQ-08) ==="
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
   "$RIG/echo/no-project")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
-test "$code" = "200"
-# Without X-Project, vault lookup is skipped -> original JWT passes through
-echo "$body" | grep -qF "\"authorization\": \"$JWT_JBALCAS\""
+test "$code" = "400"
+# Body must reference Tier-3 and the facility name
+echo "$body" | grep -q "Tier-3"
+echo "$body" | grep -q '"facility": *"echo"'
 
 echo "=== known user, wrong project -> pass-through ==="
 resp="$(curl -sS -w '\n%{http_code}' \

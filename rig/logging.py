@@ -11,8 +11,20 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 
+# Reserved attribute names on logging.LogRecord that we never want to serialize
+# as audit / context fields. Anything outside this set (and not already in the
+# fixed envelope below) is treated as a caller-supplied ``extra=`` field.
+_LOGRECORD_RESERVED = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "thread", "threadName", "taskName",
+    "request_id",  # surfaced in the fixed envelope below
+})
+
+
 class JsonFormatter(logging.Formatter):
-    """Format log records as single-line JSON with request context fields."""
+    """Format log records as single-line JSON with all ``extra=`` fields preserved."""
 
     def format(self, record: logging.LogRecord) -> str:
         """Serialize a log record to a JSON string."""
@@ -25,9 +37,14 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info and record.exc_info[1]:
             entry["exception"] = self.formatException(record.exc_info)
-        for key in ("facility", "path", "method", "status", "latency_ms"):
-            if hasattr(record, key):
-                entry[key] = getattr(record, key)
+        # Promote every caller-supplied ``extra=`` field so audit / trace /
+        # binding / debug records expose their full structured context.
+        for key, value in record.__dict__.items():
+            if key in _LOGRECORD_RESERVED or key.startswith("_"):
+                continue
+            if key in entry:
+                continue
+            entry[key] = value
         return json.dumps(entry, default=str)
 
 

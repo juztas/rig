@@ -1,0 +1,105 @@
+# Zero-trust ingress / egress policy for the `rig` namespace (RFC Section 3F).
+#
+# Layout:
+#   1. `default-deny` blocks every pod-to-pod and external connection in the
+#      namespace until a more specific allow-policy permits it.
+#   2. `allow-rig-ingress` permits the kong / load-balancer ingress controller
+#      to reach the rig service on TCP 8000.
+#   3. `allow-rig-egress` permits rig replicas to:
+#        - resolve DNS via the cluster CoreDNS pods (TCP/UDP 53);
+#        - reach the kube-apiserver (vault_backend=kube) on TCP 443;
+#        - reach Redis (kube service `redis`) on TCP 6379 for the jti blocklist;
+#        - reach external IRI facility APIs (any HTTPS endpoint, TCP 443).
+#
+# Operators with stricter requirements can replace the open egress with an
+# explicit per-CIDR egress list — but that list is environment-specific so
+# rig ships only the open default here.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: rig
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rig-ingress
+  namespace: rig
+spec:
+  podSelector:
+    matchLabels:
+      app: rig
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Kong gateway / ingress controllers in the `kong` or `ingress-nginx`
+        # namespaces. Adjust the namespaceSelector match-label to whatever
+        # your cluster actually labels its ingress namespace with.
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - kong
+                  - ingress-nginx
+                  - kube-system
+        # Other rig replicas (probe traffic, e.g. kubelet liveness via the
+        # node IP — most CNIs route this from the node itself, so allow the
+        # whole cluster pod CIDR is operationally common; restrict if your
+        # CNI exposes the kubelet probe source explicitly).
+        - podSelector:
+            matchLabels:
+              app: rig
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rig-egress
+  namespace: rig
+spec:
+  podSelector:
+    matchLabels:
+      app: rig
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS (CoreDNS).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # kube-apiserver (vault_backend=kube reads facility credentials via the API).
+    - ports:
+        - protocol: TCP
+          port: 443
+    # Redis blocklist — adjust the namespaceSelector / podSelector to match
+    # your operator-deployed Redis (Bitnami Helm uses `app.kubernetes.io/name=redis`).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # External IRI facility APIs and IdP token-exchange endpoints.
+    - ports:
+        - protocol: TCP
+          port: 443
