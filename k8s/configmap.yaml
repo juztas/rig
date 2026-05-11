@@ -7,16 +7,16 @@ data:
   config.yaml: |
     facilities:
       nersc:
-        base_url: "https://api.iri.nersc.gov/api/v1"
+        base_url: "https://api.iri.nersc.gov"
         timeout: 60
       esnet-east:
-        base_url: "https://iri-dev.ppg.es.net/api/v1"
+        base_url: "https://iri-dev.ppg.es.net"
         timeout: 60
       esnet-west:
-        base_url: "https://esnet-west.sdn-sense.net/api/v1"
+        base_url: "https://esnet-west.sdn-sense.net"
         timeout: 60
       alcf:
-        base_url: "https://api.alcf.anl.gov/api/v1"
+        base_url: "https://api.alcf.anl.gov"
         timeout: 60
 
     max_connections: 1000

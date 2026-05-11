@@ -26,7 +26,7 @@ curl http://localhost:8000/health
 curl http://localhost:8000/ready
 
 # proxy a request to NERSC
-curl http://localhost:8000/nersc/compute/jobs \
+curl http://localhost:8000/nersc/api/v1/facility \
   -H "Authorization: Bearer <token>" \
   -H "X-Project: m3795"
 ```
@@ -133,16 +133,16 @@ Settings are loaded in this priority order:
 ```yaml
 facilities:
   nersc:
-    base_url: "https://api.iri.nersc.gov/api/v1"
+    base_url: "https://api.iri.nersc.gov"
     timeout: 60
   esnet-east:
-    base_url: "https://iri-dev.ppg.es.net/api/v1"
+    base_url: "https://iri-dev.ppg.es.net"
     timeout: 60
   esnet-west:
-    base_url: "https://esnet-west.sdn-sense.net/api/v1"
+    base_url: "https://esnet-west.sdn-sense.net"
     timeout: 60
   alcf:
-    base_url: "https://api.alcf.anl.gov/api/v1"
+    base_url: "https://api.alcf.anl.gov"
     timeout: 60
 
 max_connections: 1000
@@ -235,16 +235,16 @@ Example:
 ```yaml
 facilities:
   nersc:
-    base_url: "https://api.iri.nersc.gov/api/v1"
+    base_url: "https://api.iri.nersc.gov"
     timeout: 60
   esnet-east:
-    base_url: "https://iri-dev.ppg.es.net/api/v1"
+    base_url: "https://iri-dev.ppg.es.net"
     timeout: 60
   esnet-west:
-    base_url: "https://esnet-west.sdn-sense.net/api/v1"
+    base_url: "https://esnet-west.sdn-sense.net"
     timeout: 60
   alcf:
-    base_url: "https://api.alcf.anl.gov/api/v1"
+    base_url: "https://api.alcf.anl.gov"
     timeout: 60
 
 vault_backend: docker
@@ -468,7 +468,9 @@ Incoming request
 ```
 
 All methods, all paths. RIG does not inspect or validate the downstream path --
-it forwards whatever the client sends.
+it forwards whatever the client sends. Callers must provide the full upstream API
+path after the facility segment, for example `/api/v1/facility` or
+`/api/v2/compute/jobs`.
 
 **Required headers:**
 
@@ -480,19 +482,19 @@ it forwards whatever the client sends.
 **Examples:**
 
 ```bash
-# List compute jobs at NERSC
-curl http://rig:8000/nersc/compute/jobs \
+# List facility metadata at NERSC
+curl http://rig:8000/nersc/api/v1/facility \
   -H "Authorization: Bearer <token>"
 
 # Submit a job at ESnet-East with project context
-curl -X POST http://rig:8000/esnet-east/compute/jobs \
+curl -X POST http://rig:8000/esnet-east/api/v1/compute/job/perlmutter \
   -H "Authorization: Bearer <token>" \
   -H "X-Project: m3795" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-job", "script": "#!/bin/bash\necho hello"}'
 
 # List files at ALCF
-curl http://rig:8000/alcf/filesystem/ls?path=/home/alice \
+curl http://rig:8000/alcf/api/v1/filesystem/ls/theta?path=/home/alice \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -519,7 +521,7 @@ All log output is single-line JSON to stdout:
   "message": "Proxied request",
   "request_id": "a1b2c3d4-...",
   "facility": "nersc",
-  "path": "compute/jobs",
+  "path": "api/v1/facility",
   "method": "GET",
   "status": 200,
   "latency_ms": 142

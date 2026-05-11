@@ -12,6 +12,7 @@ import asyncio
 import base64
 import functools
 import hashlib
+import inspect
 import json
 import threading
 import time
@@ -54,7 +55,9 @@ async def _get_kube_v1_api() -> Any:
         if _kube_v1_api is not None:
             return _kube_v1_api
         if not _kube_initialized:
-            k8s_config.load_incluster_config()
+            maybe_awaitable = k8s_config.load_incluster_config()
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
             _kube_initialized = True
         _kube_api_client = k8s_client.ApiClient()
         _kube_v1_api = k8s_client.CoreV1Api(_kube_api_client)

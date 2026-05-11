@@ -52,7 +52,7 @@ echo "=== known user (jbalcas/smoke) -> token rewritten to smoke-vault-token ===
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
   -H 'X-Project: smoke' \
-  "$RIG/echo/some/path?x=1")"
+  "$RIG/echo/api/v1/some/path?x=1")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -60,7 +60,7 @@ echo "$body"
 test "$code" = "200"
 # echo upstream returns the request as JSON, including the rewritten Authorization header
 echo "$body" | grep -q '"authorization": "Bearer smoke-vault-token"'
-echo "$body" | grep -q '"path": "/some/path"'
+echo "$body" | grep -q '"path": "/api/v1/some/path"'
 # RFC Section 3C mandatory traceability headers
 echo "$body" | grep -q '"x-amsc-user": "jbalcas"'
 echo "$body" | grep -q '"x-amsc-project": "smoke"'
@@ -70,7 +70,7 @@ echo "=== unknown user (stranger) -> pass-through (original JWT reaches upstream
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_STRANGER" \
   -H 'X-Project: smoke' \
-  "$RIG/echo/another")"
+  "$RIG/echo/api/v1/another")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -80,7 +80,7 @@ echo "$body" | grep -qF "\"authorization\": \"$JWT_STRANGER\""
 echo "=== known user but missing X-Project -> 400 (tier-3 fail-closed, ZT-REQ-08) ==="
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
-  "$RIG/echo/no-project")"
+  "$RIG/echo/api/v1/no-project")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -93,7 +93,7 @@ echo "=== known user, wrong project -> pass-through ==="
 resp="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: $JWT_JBALCAS" \
   -H 'X-Project: not-smoke' \
-  "$RIG/echo/wrong-proj")"
+  "$RIG/echo/api/v1/wrong-proj")"
 code="$(echo "$resp" | tail -1)"
 body="$(echo "$resp" | sed '$d')"
 echo "status=$code"
@@ -105,7 +105,7 @@ echo "=== proxy injects x-request-id and x-upstream-latency-ms ==="
 hdrs="$(curl -sS -D - -o /dev/null \
   -H "Authorization: $JWT_JBALCAS" \
   -H 'X-Project: smoke' \
-  "$RIG/echo/headers-check")"
+  "$RIG/echo/api/v1/headers-check")"
 echo "$hdrs" | grep -i -q '^x-request-id:'
 echo "$hdrs" | grep -i -q '^x-upstream-latency-ms:'
 

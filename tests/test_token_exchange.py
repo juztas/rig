@@ -145,7 +145,7 @@ async def test_resolve_identity_uses_token_exchange_for_orchestrator():
 async def test_resolve_identity_passes_through_when_no_exchange_config():
     """Facilities without token_exchange config keep their original authorization."""
     settings = Settings(
-        facilities={"nersc": FacilityConfig(base_url="https://api.iri.nersc.gov/api/v1")}
+        facilities={"nersc": FacilityConfig(base_url="https://api.iri.nersc.gov")}
     )
     transport = _MockTransport(200, {"access_token": "should-not-be-called"})
     async with httpx.AsyncClient(transport=transport) as client:

@@ -194,7 +194,7 @@ class RecordingHttpClient:
 async def test_client(monkeypatch):
     test_settings = Settings(
         facilities={
-            "test-facility": FacilityConfig(base_url="https://upstream.example/api/"),
+            "test-facility": FacilityConfig(base_url="https://upstream.example"),
         }
     )
 
@@ -270,13 +270,13 @@ async def test_proxy_preserves_duplicate_query_params_and_resolved_auth(test_cli
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
     response = await client.get(
-        "/test-facility/echo?a=1&a=2&b=3",
+        "/test-facility/api/v1/echo?a=1&a=2&b=3",
         headers={"authorization": "Bearer original", "x-project": "demo"},
     )
 
     assert response.status_code == 200
     assert response.json() == {"proxied": True}
-    assert recording_client.request_args["url"] == "https://upstream.example/api/echo"
+    assert recording_client.request_args["url"] == "https://upstream.example/api/v1/echo"
     assert recording_client.request_args["params"] == [("a", "1"), ("a", "2"), ("b", "3")]
     assert recording_client.request_args["timeout"] == httpx.Timeout(60.0, connect=10.0)
     assert recording_client.request_args["headers"]["authorization"] == "Bearer resolved"
@@ -318,7 +318,7 @@ async def test_proxy_prefers_trusted_userinfo_header(test_client, monkeypatch):
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
     response = await client.get(
-        "/test-facility/echo",
+        "/test-facility/api/v1/echo",
         headers={
             "authorization": "Bearer opaque-token",
             "x-project": "demo",
@@ -337,7 +337,7 @@ async def test_proxy_prefers_trusted_userinfo_header(test_client, monkeypatch):
 async def test_proxy_uses_facility_specific_timeout(test_client, monkeypatch):
     client, app, proxy_mod = test_client
     timeout_settings = Settings(
-        facilities={"test-facility": FacilityConfig(base_url="https://upstream.example/api/", timeout=12.5)}
+        facilities={"test-facility": FacilityConfig(base_url="https://upstream.example", timeout=12.5)}
     )
     monkeypatch.setattr(app_mod, "settings", timeout_settings)
     monkeypatch.setattr(proxy_mod, "settings", timeout_settings)
@@ -355,7 +355,7 @@ async def test_proxy_uses_facility_specific_timeout(test_client, monkeypatch):
     monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
     monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
 
-    response = await client.get("/test-facility/echo")
+    response = await client.get("/test-facility/api/v1/echo")
 
     assert response.status_code == 200
     assert recording_client.request_args["timeout"] == httpx.Timeout(12.5, connect=10.0)
@@ -459,7 +459,7 @@ async def test_project_match_passes(test_client, monkeypatch):
 async def tier3_client(monkeypatch):
     """Test client with a single tier-3 (vault-backed) facility."""
     test_settings = Settings(
-        facilities={"vaulted": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"vaulted": FacilityConfig(base_url="https://upstream.example")},
         vault_backend="docker",
     )
     monkeypatch.setattr(app_mod, "settings", test_settings)
@@ -834,7 +834,7 @@ async def test_proxy_returns_401_when_jwt_validation_enabled_and_token_invalid(m
     from rig.config import FacilityConfig, JWTValidationConfig, Settings
 
     test_settings = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         jwt_validation=JWTValidationConfig(enabled=True, jwks_url="https://idp/jwks.json"),
     )
     monkeypatch.setattr(app_mod, "settings", test_settings)
@@ -1249,7 +1249,7 @@ async def test_proxy_denies_service_token_outside_allowlist(monkeypatch):
     from rig.config import FacilityConfig, Settings
 
     settings = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         service_account_allowed_cidrs=["10.0.0.0/8"],
     )
     monkeypatch.setattr(app_mod, "settings", settings)
@@ -1276,7 +1276,7 @@ async def test_proxy_allows_service_token_inside_allowlist(monkeypatch):
     from rig.config import FacilityConfig, Settings
 
     settings = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         service_account_allowed_cidrs=["10.0.0.0/8"],
     )
     monkeypatch.setattr(app_mod, "settings", settings)
@@ -1313,7 +1313,7 @@ async def test_proxy_allows_mfa_token_outside_allowlist(monkeypatch):
     from rig.config import FacilityConfig, Settings
 
     settings = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         service_account_allowed_cidrs=["10.0.0.0/8"],
     )
     monkeypatch.setattr(app_mod, "settings", settings)
@@ -1349,7 +1349,7 @@ async def test_proxy_no_enforcement_when_cidr_list_empty(monkeypatch):
     from rig.config import FacilityConfig, Settings
 
     settings = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         service_account_allowed_cidrs=[],
     )
     monkeypatch.setattr(app_mod, "settings", settings)
@@ -1698,7 +1698,7 @@ async def test_challenge_401_html_browser_redirects_when_login_url_set(test_clie
     from rig.config import FacilityConfig, JWTValidationConfig, Settings
 
     settings_w_redirect = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         jwt_validation=JWTValidationConfig(enabled=True, jwks_url="https://idp/jwks.json"),
         auth_redirect_login_url="https://login.example/oidc",
     )
@@ -1734,7 +1734,7 @@ async def test_challenge_401_cli_includes_device_flow_uri(test_client, monkeypat
     from rig.config import FacilityConfig, JWTValidationConfig, Settings
 
     settings_w_device = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         jwt_validation=JWTValidationConfig(enabled=True, jwks_url="https://idp/jwks.json"),
         auth_device_flow_uri="https://login.example/device",
     )
@@ -1768,7 +1768,7 @@ async def test_challenge_401_no_config_falls_back_to_plain_json(test_client, mon
     from rig.config import FacilityConfig, JWTValidationConfig, Settings
 
     settings_bare = Settings(
-        facilities={"f": FacilityConfig(base_url="https://upstream.example/api/")},
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
         jwt_validation=JWTValidationConfig(enabled=True, jwks_url="https://idp/jwks.json"),
     )
     monkeypatch.setattr(app_mod, "settings", settings_bare)
@@ -2070,4 +2070,3 @@ async def test_proxy_injects_traceparent_into_upstream(test_client, monkeypatch,
     upstream_headers = recording_client.request_args["headers"]
     assert "traceparent" in upstream_headers
     assert upstream_headers["traceparent"].startswith("00-")
-
