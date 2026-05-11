@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .admin import router as admin_router
@@ -60,8 +61,58 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RIG - Resource Integration Gateway",
     version="0.1.0",
+    description=(
+        "Stateless reverse proxy and identity broker for IRI Facility APIs.\n\n"
+        "Click **Authorize** to paste a Bearer token, then use **Try it out** on any "
+        "endpoint. For Tier-3 facilities the `X-Project` header is required."
+    ),
     lifespan=lifespan,
+    swagger_ui_parameters={
+        # Keep the Authorize state across page reloads so users don't have to
+        # re-paste their token on every refresh.
+        "persistAuthorization": True,
+    },
 )
+
+
+def _build_openapi():
+    """Inject Bearer + X-Project security schemes so Swagger UI exposes both.
+
+    Rig itself does not enforce these at the FastAPI layer — Kong already gates
+    incoming requests with `bearer_only: true`, and the existing proxy handler
+    reads ``X-Project`` directly off the request. The security blocks are
+    documentation-only, so Swagger UI surfaces an **Authorize** button (for the
+    bearer token) and a per-endpoint field for ``X-Project``.
+    """
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schema["components"]["securitySchemes"]["BearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Paste a Globus / OIDC access token here. Get one from the MyAmSC portal's \"Raw Tokens\" panel.",
+    }
+    schema["components"]["securitySchemes"]["ProjectHeader"] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Project",
+        "description": "Project context. Required for Tier-3 (vaulted) facilities; ignored for Tier-1 pass-through.",
+    }
+    # Global security default; individual routes can still opt out by setting
+    # security=[] on their decorator if needed.
+    schema["security"] = [{"BearerAuth": [], "ProjectHeader": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _build_openapi
 
 app.add_middleware(RequestIdMiddleware)
 # Admin routes are registered first so the /admin/blocklist path matches before
