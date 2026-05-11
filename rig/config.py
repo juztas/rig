@@ -1,12 +1,15 @@
 """Pydantic-settings configuration loader with YAML file and environment variable support."""
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_REF_RE = re.compile(r"^\$\{([A-Z0-9_]+)(?::-([^}]*))?\}$")
 
 
 class TokenExchangeConfig(BaseModel):
@@ -175,8 +178,22 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     """Read and parse a YAML file, returning an empty dict if the file does not exist."""
     if path.is_file():
         with open(path) as f:
-            return yaml.safe_load(f) or {}
+            return _expand_env_refs(yaml.safe_load(f) or {})
     return {}
+
+
+def _expand_env_refs(value: Any) -> Any:
+    """Recursively expand `${ENV_VAR}` or `${ENV_VAR:-default}` string values."""
+    if isinstance(value, dict):
+        return {k: _expand_env_refs(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_refs(v) for v in value]
+    if isinstance(value, str):
+        match = _ENV_REF_RE.match(value)
+        if match:
+            env_name, default = match.groups()
+            return os.environ.get(env_name, default or "")
+    return value
 
 
 def load_settings() -> Settings:

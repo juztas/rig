@@ -13,13 +13,14 @@ facilities:
     timeout: 60
   # SENSE-O East orchestrator — RIG exchanges the caller's Globus Bearer token
   # for a SENSE-O access token via RFC 8693 before proxying upstream.
+  # To obtain the client credentials, contact xiyang@es.net.
   orchestrator:
     base_url: "https://sense-o-east.es.net:8543"
     timeout: 60
     token_exchange:
       auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"
-      client_id: "Portal"
-      client_secret: ""
+      client_id: "${RIG_ORCHESTRATOR_CLIENT_ID}"
+      client_secret: "${RIG_ORCHESTRATOR_CLIENT_SECRET}"
       subject_issuer: "https://auth.globus.org"
       verify_tls: false
 

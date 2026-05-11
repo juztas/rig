@@ -144,6 +144,15 @@ facilities:
   alcf:
     base_url: "https://api.alcf.anl.gov"
     timeout: 60
+  orchestrator:
+    base_url: "https://sense-o-east.es.net:8543"
+    timeout: 60
+    token_exchange:
+      auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"
+      client_id: "${RIG_ORCHESTRATOR_CLIENT_ID}"
+      client_secret: "${RIG_ORCHESTRATOR_CLIENT_SECRET}"
+      subject_issuer: "https://auth.globus.org"
+      verify_tls: false
 
 max_connections: 1000
 max_keepalive_connections: 100
@@ -153,6 +162,8 @@ host: "0.0.0.0"
 port: 8000
 workers: 4
 ```
+
+For the SENSE-O orchestrator client credentials, contact `xiyang@es.net`.
 
 ### All Settings
 
@@ -246,6 +257,15 @@ facilities:
   alcf:
     base_url: "https://api.alcf.anl.gov"
     timeout: 60
+  orchestrator:
+    base_url: "https://sense-o-east.es.net:8543"
+    timeout: 60
+    token_exchange:
+      auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"
+      client_id: "${RIG_ORCHESTRATOR_CLIENT_ID}"
+      client_secret: "${RIG_ORCHESTRATOR_CLIENT_SECRET}"
+      subject_issuer: "https://auth.globus.org"
+      verify_tls: false
 
 vault_backend: docker
 docker_credentials:
@@ -262,6 +282,8 @@ docker_credentials:
       esnet-west: "bob_esnet_west_token"
       alcf: "bob_alcf_token"
 ```
+
+For the SENSE-O orchestrator client credentials, contact `xiyang@es.net`.
 
 With that config:
 
