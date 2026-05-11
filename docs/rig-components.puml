@@ -1,0 +1,104 @@
+@startuml rig-components
+title RIG — module layout and external dependencies\n(packages match files under rig/)
+
+skinparam DefaultFontName Helvetica
+skinparam DefaultMonospacedFontName "Menlo, Consolas, monospace"
+skinparam packageStyle rectangle
+skinparam noteFontSize 11
+skinparam componentFontSize 12
+
+actor Client
+component "Kong\n(OIDC plugin)" as Kong
+component "Load Balancer" as LB
+
+package "rig (FastAPI app)" {
+  component "app.py\n— FastAPI startup\n— /health /ready /metrics\n— openapi: BearerAuth + ProjectHeader\n— wires JWTValidator + RevocationChecker into app.state" as App
+
+  component "proxy.py\n— /{facility}/{path:path}\n— span wrapper (rig.proxy)\n— project mismatch / tier-3 fail-closed\n— IP allowlist for service tokens\n— upstream header injection (X-AmSC-*, X-Forwarded-*)\n— 401 challenge: HTML 302 vs JSON" as Proxy
+
+  component "admin.py\n— /admin/blocklist\n— bearer-token auth\n— pushes jti to RevocationChecker" as Admin
+
+  component "identity.py\n— resolve_identity()\n— exchange → vault → passthrough chain\n— auth_time freshness gate\n— pool detection (sha256 fingerprint)\n— rig.vault.binding audit event\n— vault backends: kube / aws / docker" as Identity
+
+  component "token_exchange.py\n— RFC 8693 POST\n— audience override\n— requested_scope\n— forbidden_scopes guard\n— per-call verify_tls\n— per-facility timeout" as Exchange
+
+  component "exchange_cache.py\n— per-process LRU TTL cache\n— key: (sub, facility, scope)\n— TTL = exp − skew" as ExchangeCache
+
+  component "revocation.py\n— RevocationChecker\n— Redis blocklist (fail-open)\n— DNSBL TXT lookup (60s cache)\n— block() admin write path" as Revocation
+
+  component "jwt_validator.py\n— JWKS-backed validation\n— iss / aud / exp / signature\n— OFF by default" as JWTV
+
+  component "tracing.py\n— OTel context extract/inject\n— set_audit_attributes()\n— current_trace_ids() for logs" as Tracing
+
+  component "policy.py\n— optional external policy POST" as Policy
+
+  component "config.py\n— pydantic-settings YAML loader\n— FacilityConfig + TokenExchangeConfig\n— resolve_tier()\n— JWTValidationConfig" as Config
+
+  component "headers.py\n— hop-by-hop strip\n— preserve X-Forwarded-*" as Headers
+
+  component "logging.py\n— JSON formatter\n— surfaces every extra= field\n— X-Request-ID middleware" as Logging
+}
+
+component "Facility IdP\n(RFC 8693 endpoint)" as FacIdP
+component "Vault Backend\n• Kubernetes Secrets\n• AWS Secrets Manager\n• Docker (local-dev map)" as Vault
+component "Redis\n(blocklist)" as Redis
+component "DNSBL zone\n(TXT records)" as DNSBL
+component "External Policy Engine\n(optional)" as OPA
+component "Target Facility API\n(IRI ref impl / NERSC SFAPI / ...)" as Facility
+
+' --- Ingress paths ----------------------------------------------------------
+Client --> Kong : 1
+Kong --> LB : 2
+LB --> App : 3
+
+' --- Routing inside the app -------------------------------------------------
+App ..> Proxy : route /{facility}/{path}
+App ..> Admin : route /admin/*
+App ..> Tracing : openapi + lifespan wiring
+App ..> Config : load settings
+App ..> Logging : configure_logging()
+
+Proxy --> Tracing : start span, set attrs,\ninject traceparent
+Proxy --> JWTV : validate (when enabled)
+Proxy --> Revocation : is_revoked(jti)
+Proxy --> Identity : resolve_identity()
+Proxy --> Policy : is_allowed() (when configured)
+Proxy --> Headers : filter request / response
+Proxy --> Logging : rig.audit per request
+
+Identity --> Exchange : (Tier 2 facilities)
+Exchange --> ExchangeCache : get / set
+Exchange --> FacIdP : RFC 8693 POST
+Identity --> Vault : (Tier 3 facilities)
+Identity --> Logging : rig.vault.binding event
+
+Admin --> Revocation : block(jti)
+Revocation --> Redis : EXISTS / SETEX
+Revocation --> DNSBL : DNS TXT
+Policy --> OPA : POST
+
+' --- Outbound proxy hop -----------------------------------------------------
+Proxy --> Facility : streamed request /\nstreamed response
+
+note right of App
+  Modules are intentionally narrow.
+  Proxy never talks directly to Vault / Redis /
+  DNSBL — it routes through Identity and
+  Revocation so policy stays in one place.
+end note
+
+note right of JWTV
+  Off by default (Kong handles OIDC at the
+  edge). Enable for deployments where rig
+  is reachable from any path not gated by
+  Kong, as defence-in-depth.
+end note
+
+note right of Revocation
+  Fail-open: Redis or DNSBL errors never
+  break the request path. Revocation is
+  defence-in-depth on top of natural token
+  expiry.
+end note
+
+@enduml

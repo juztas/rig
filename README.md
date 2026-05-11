@@ -35,32 +35,76 @@ curl http://localhost:8000/nersc/compute/jobs \
 
 ```
 rig/
-  app.py        FastAPI app, httpx client lifespan, health endpoints
-  proxy.py      Wildcard route /{facility}/{path:path}
-  identity.py   Pass-through or vault-backed identity resolution
-  policy.py     Per-request authorization (stub)
-  config.py     pydantic-settings + YAML config loader
-  headers.py    Hop-by-hop header filtering
-  logging.py    Structured JSON logging, X-Request-ID middleware
+  app.py             FastAPI startup; /health /ready /metrics;
+                     OpenAPI security schemes (BearerAuth + ProjectHeader);
+                     wires JWTValidator + RevocationChecker into app.state
+  proxy.py           Wildcard route /{facility}/{path:path};
+                     OTel span wrapper; project-mismatch / tier-3 fail-closed;
+                     IP-allowlist gate; upstream header injection;
+                     differentiated 401 (HTML 302 vs JSON challenge)
+  admin.py           /admin/blocklist — push a jti to the revocation blocklist
+  identity.py        resolve_identity() chain: exchange → vault → passthrough;
+                     auth_time freshness; pool-detection fingerprint; binding-event audit;
+                     vault backends (kube / aws / docker)
+  token_exchange.py  RFC 8693 POST with per-call timeout, configurable audience,
+                     requested_scope, forbidden_scopes guard, per-call verify_tls
+  exchange_cache.py  Per-process LRU TTL cache for exchanged tokens
+                     (key: sub + facility + scope; TTL = exp − skew)
+  revocation.py      RevocationChecker — Redis blocklist + DNSBL fallback
+                     (fail-open; admin block() write path)
+  jwt_validator.py   JWKS-backed inbound JWT validation (OFF by default)
+  tracing.py         OpenTelemetry context propagation + canonical rig.* attrs
+  policy.py          Optional external policy-engine HTTP hook
+  config.py          pydantic-settings YAML loader; FacilityConfig +
+                     TokenExchangeConfig + JWTValidationConfig + resolve_tier()
+  headers.py         Hop-by-hop header filtering
+  logging.py         Structured JSON logging surfacing every extra= field
 ```
+
+See [`docs/rig-components.png`](docs/rig-components.png) for a module / dependency
+diagram and [`docs/rig-sequence.png`](docs/rig-sequence.png) for the full
+request-flow sequence.
 
 ### Request Pipeline
 
-Every request flows through these steps in order:
+Every proxied request flows through these gates, in order. Most are opt-in and
+no-op when the corresponding configuration knob is absent.
 
-1. **Resolve facility** -- look up `{facility}` in the configured facility map.
-   Returns 404 if unknown.
-2. **Identity resolution** -- resolve the `Authorization` header for the upstream.
-   See [Identity Resolution](#identity-resolution) below.
-3. **Policy check** -- call the external policy engine (if configured).
-   Returns 403 if denied.
-4. **Header filtering** -- strip hop-by-hop headers, rewrite `Host`, preserve
-   `X-Forwarded-*` from Kong.
-5. **Stream to upstream** -- forward the full request (method, path, query params,
-   headers, body) using a shared `httpx.AsyncClient` with connection pooling.
-   Request and response bodies are streamed without buffering.
-6. **Stream response back** -- return the upstream status code, headers, and body
-   to the client.
+1. **OTel span start** — open a `rig.proxy` span; continue any inbound
+   `traceparent` so this span becomes a child of the caller's.
+2. **Resolve facility** — look up `{facility}` in the configured map and infer
+   its `tier` (1 = pass-through, 2 = token-exchange, 3 = vault). Returns 404 if
+   unknown.
+3. **Bearer normalisation** — if `Authorization` is absent but `X-Access-Token`
+   is set (Kong-OIDC consumed the inbound bearer), promote it.
+4. **JWT validation (optional)** — when `jwt_validation.enabled = true`, verify
+   signature / iss / aud / exp via JWKS. On failure return 401 (or 302 redirect
+   for HTML callers if `auth_redirect_login_url` is set).
+5. **Revocation check (optional)** — when Redis or DNSBL is configured, look up
+   the JWT's `jti`. Revoked → 401. Both checks fail open on backend errors.
+6. **IP allowlist (optional)** — when `service_account_allowed_cidrs` is set,
+   tokens with no recognised MFA `amr` value must originate from an allowed
+   CIDR or get a 403.
+7. **Project-context cross-check** — `X-Project` header vs the JWT's
+   `amsc_project_context` claim. Disagreement → 403. For Tier-3 facilities the
+   project is required; missing → 400.
+8. **Identity resolution** — `exchange → vault → passthrough` chain (see
+   [Identity Resolution](#identity-resolution)).
+9. **Policy check (optional)** — call the configured external policy engine.
+   Denied → 403.
+10. **Header build** — strip hop-by-hop; preserve `X-Forwarded-*`; inject
+    `X-AmSC-Trace-Id / -User / -Project`, plus `X-AmSC-Auth-Time / -Amr / -Acr /
+    -Idp` when the JWT carries those claims, plus `X-AmSC-Exchange-Status`
+    (Completed / Vaulted) when the identity resolver swapped the bearer.
+    Re-inject the outbound `traceparent`.
+11. **Stream to upstream** — full method / path / query / headers / body
+    streamed via the shared `httpx.AsyncClient` (HTTP/2, connection pooled).
+    Body is never buffered, never inspected.
+12. **Stream response back** — preserve upstream status / headers / body;
+    append `X-Request-Id` and `X-Upstream-Latency-Ms`.
+13. **Audit log** — single `rig.audit` line per request with `decision`,
+    `status`, `facility`, `tier`, `sub`, `jti`, `project`, `method`, `path`,
+    `latency_ms`, `resolution_mechanism`, `trace_id`, `span_id`.
 
 ### Statelessness
 

@@ -1,0 +1,241 @@
+@startuml rig-sequence
+title Stateless Reverse Proxy and Identity Broker for IRI Facility APIs\n(as implemented — see RIG-ROADMAP.md for what is still missing)
+
+' Force a font that ships on every macOS/Linux/Windows JVM. Avoids the
+' "Times font not available" Swing warning some renderers surface as an "error".
+skinparam DefaultFontName Helvetica
+skinparam DefaultMonospacedFontName "Menlo, Consolas, monospace"
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam noteFontSize 11
+autonumber
+
+actor Client
+
+participant "Kong\n(OIDC / Globus)" as Kong
+participant "Load Balancer" as LB
+
+box "RIG Replica Pool — horizontally scalable, stateless"
+participant "RIG Replica\n(/{facility}/{path:path})\n+ tracing.span" as RIG
+database  "Facility Map +\nTier resolution\n(config.yaml)" as Map
+participant "JWT Validator\n(JWKS, optional)" as JWTV
+participant "Revocation Checker\n(jti blocklist)" as REV
+participant "Identity Resolver\n(exchange → vault → passthrough)" as IDR
+database  "Exchange-token cache\n(per-process, TTL)" as Cache
+end box
+
+participant "Redis blocklist /\nDNSBL zone" as RedisDNS
+participant "Facility IdP\n(RFC 8693 endpoint)" as FacIdP
+participant "Vault Backend\nKubernetes Secrets /\nAWS Secrets Manager /\nDocker map" as Vault
+participant "External Policy Engine\n(optional)" as OPA
+participant "Target Facility API" as Facility
+
+== Inbound: Kong → LB → RIG ==
+
+Client -> Kong : 1. Request /{facility}/...\nAuthorization: Bearer ...\nX-Project: ...\ntraceparent: ...
+Kong -> Kong  : 2. Verify OIDC / Globus token\n(may consume Authorization;\nre-expose validated bearer\nas X-Access-Token)
+Kong -> Kong  : 3. Inject X-Userinfo (b64 JSON of user)\n+ X-Forwarded-Host/Proto/Prefix
+Kong -> LB    : 4. Forward verified request
+LB   -> RIG   : 5. Route to any healthy replica
+
+note over RIG, IDR
+  RIG is **not** an IRI implementation.
+  Each replica is stateless — scale by adding replicas.
+  Every request runs inside an OpenTelemetry **rig.proxy** span
+  that continues the inbound ``traceparent`` and is re-injected
+  into the upstream request so the facility's tracing picks up.
+end note
+
+== Facility resolution ==
+
+RIG -> Map : 6. Resolve {facility} + tier\n(resolve_tier())
+alt Unknown facility
+  Map -> RIG : 7. miss
+  RIG -> RIG : 8. Audit deny\nreason=unknown_facility
+  RIG --> LB : 9. **404 Not Found**
+  LB --> Kong : 10.
+  Kong --> Client : 11.
+else Known facility
+  Map -> RIG : 12. base_url, timeout,\ntier (1|2|3),\noptional token_exchange config
+end
+
+== Bearer normalisation + JWKS validation ==
+
+RIG -> RIG : 13. Authorization fallback\nif Authorization absent but X-Access-Token present,\npromote it (Kong-OIDC plugin handoff)
+
+opt jwt_validation.enabled
+  RIG -> JWTV : 14. validate(authorization)
+  alt Token invalid
+    JWTV --> RIG : reason=token_expired | invalid_issuer\n| invalid_audience | invalid_signature\n| key_lookup_failed | decode_failed
+    RIG -> RIG  : 15. Audit deny\nreason=token_invalid:<code>
+    RIG --> Client : 16. **401** (or **302** to login URL\nif Accept: text/html and\nauth_redirect_login_url is set)
+  else Token valid
+    JWTV --> RIG : ok
+  end
+end
+
+== Token revocation (RFC Section 2F) ==
+
+opt revocation_redis_url or revocation_dnsbl_zone is set
+  RIG -> REV : 17. is_revoked(jti)
+  REV -> RedisDNS : 18a. SET? rig:blocklist:<jti>\n(Redis, fail-open)
+  REV -> RedisDNS : 18b. TXT? sha256(jti).<dnsbl_zone>\n(DNSBL, 60s in-process cache)
+  alt revoked
+    REV --> RIG : 19. (true, "redis"|"dnsbl")
+    RIG -> RIG  : 20. Audit deny\nreason=revoked:<source>
+    RIG --> Client : 21. **401** (HTML/CLI differentiated)
+  else clean
+    REV --> RIG : ok
+  end
+end
+
+== IP allowlist for non-MFA service tokens ==
+
+opt service_account_allowed_cidrs is non-empty
+  alt JWT amr lacks any recognised MFA value
+    RIG -> RIG    : 22. resolve client IP\n(X-Forwarded-For first hop, else peer)
+    alt IP not in any allowlist CIDR
+      RIG -> RIG    : 23. Audit deny\nreason=service_token_outside_cidr
+      RIG --> Client : 24. **403** (body: client_ip)
+    end
+  end
+end
+
+== Project-context cross-check (always on, ZT-REQ-04) ==
+
+RIG -> RIG : 25. Decode JWT (no sig verify)\nextract sub, jti, amsc_project_context\nauth_time, amr, acr, idp
+
+alt X-Project header AND claim disagree
+  RIG -> RIG    : 26. Audit deny\nreason=project_mismatch
+  RIG --> Client : 27. **403** (body: header_project, claim_project)
+else Match or only one source
+  RIG -> RIG : 28. effective project = header OR claim
+end
+
+alt tier == 3 AND no project (header or claim)
+  RIG -> RIG    : 29. Audit deny\nreason=missing_project_for_tier3
+  RIG --> Client : 30. **400** (body: hint to send X-Project)
+end
+
+== Identity resolution: exchange → vault → passthrough ==
+
+RIG -> IDR : 31. resolve_identity(authorization, facility, project, ...)
+
+note over IDR
+  Returns ``(authorization, mechanism)``
+  mechanism ∈ {exchange, vault, passthrough, none}
+end note
+
+opt Tier 2 — facility has token_exchange config
+  IDR -> Cache : 32. cache.get(sub, facility, requested_scope)
+  alt cache hit
+    Cache --> IDR : 33. cached "Bearer ..."
+    IDR --> RIG    : 34. (..., "exchange")
+  else cache miss
+    IDR -> FacIdP : 35. RFC 8693 POST\ngrant_type=token-exchange\nsubject_token=<bearer>\naudience=<override or client_id>\nscope=<requested_scope or absent>\ntimeout=token_exchange.timeout_seconds (default 5s)\nverify_tls per-call (one-off AsyncClient when False)
+    alt Exchange success
+      FacIdP --> IDR : 36. access_token
+      IDR -> IDR    : 37. forbidden_scopes guard\n(reject over-broad downstream tokens)
+      IDR -> Cache : 38. cache.set(...) TTL = exp − skew
+      IDR --> RIG    : 39. (Bearer <swapped>, "exchange")
+    else Failure / timeout / forbidden_scopes
+      FacIdP --> IDR : 36. error / timeout
+      IDR -> IDR     : 37. log → downgrade to Tier 3
+    end
+  end
+end
+
+opt Tier 3 — vault_backend set AND (sub + project) available
+  IDR -> IDR : 40. auth_time freshness check\n(reject when older than vault_max_auth_age_seconds)
+  IDR -> Vault : 41. lookup(user, project, facility)
+  alt Hit
+    Vault --> IDR : 42. facility credential
+    IDR -> IDR    : 43. pool-detection fingerprint check\n(warn / deny on cross-user reuse)
+    IDR -> IDR    : 44. emit ``rig.vault.binding`` audit\n(user, project, facility, sha256 fingerprint, backend)
+    IDR --> RIG   : 45. (Bearer <vaulted>, "vault")
+  else Miss / freshness failed / pool-deny
+    Vault --> IDR : 42. None
+    IDR -> IDR    : 43. log → fall through
+  end
+end
+
+note right of IDR
+  If both tiers above are
+  inapplicable or fail:
+  IDR returns
+  (original_auth, "passthrough")
+  — Tier 1 native pass-through
+  for federated facilities.
+end note
+
+IDR --> RIG : 46. (resolved_auth, mechanism)
+
+== Optional external policy engine ==
+
+opt policy_engine_url is configured
+  RIG -> OPA : 47. POST {user, facility, path, method}
+  alt Allow
+    OPA --> RIG : 48. allowed=true
+  else Deny
+    OPA --> RIG    : 48. allowed=false
+    RIG -> RIG     : 49. Audit deny\nreason=policy
+    RIG --> Client : 50. **403 Forbidden by policy**
+  end
+end
+
+== Upstream request ==
+
+RIG -> RIG : 51. filter hop-by-hop headers\npreserve X-Forwarded-Host/Proto/Prefix
+
+note right of RIG #LightYellow
+  Mandatory traceability (always injected):
+  • X-AmSC-Trace-Id  = request_id (UUID)
+  • X-AmSC-User      = sub (when known)
+  • X-AmSC-Project   = effective project
+
+  Session-freshness propagation (when JWT carries them):
+  • X-AmSC-Auth-Time  (epoch seconds)
+  • X-AmSC-Amr        (comma-joined)
+  • X-AmSC-Acr
+  • X-AmSC-Idp
+
+  Resolution marker (set only when applicable):
+  • X-AmSC-Exchange-Status: Completed   (mechanism = exchange)
+  • X-AmSC-Exchange-Status: Vaulted     (mechanism = vault)
+
+  Trace context:
+  • traceparent / tracestate (TraceContextTextMapPropagator.inject)
+
+  Authorization replaced with resolved_auth.
+end note
+
+RIG -> Facility : 52. Stream request\n(method, path, query, headers, body)\nshared httpx.AsyncClient (HTTP/2, conn pool)
+
+note over RIG, Facility
+  Body is **streamed**, not buffered.
+  RIG never inspects the payload.
+  Per-facility timeout from config.
+end note
+
+alt Upstream success
+  Facility --> RIG : 53. status, headers, streamed body
+else httpx.TimeoutException
+  RIG -> RIG     : 53. Audit error\nreason=upstream_timeout
+  RIG --> Client : 54. **504 Gateway Timeout**
+else httpx.ConnectError
+  RIG -> RIG     : 53. Audit error\nreason=upstream_connect
+  RIG --> Client : 54. **502 Bad Gateway**
+else Other exception
+  RIG -> RIG     : 53. Audit error\nreason=upstream_exception
+  RIG --> Client : 54. **502 Upstream error**
+end
+
+== Response back to Client ==
+
+RIG -> RIG : 55. filter hop-by-hop\ninject X-Request-Id\ninject X-Upstream-Latency-Ms
+RIG -> RIG : 56. **Audit allow**\n{decision, status, facility, tier, sub, jti, project,\n method, path, latency_ms, resolution_mechanism,\n trace_id, span_id}
+RIG --> LB    : 57. Stream upstream response
+LB  --> Kong  : 58.
+Kong --> Client : 59. Final status, headers, body
+
+@enduml
