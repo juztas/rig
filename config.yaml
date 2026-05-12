@@ -1,21 +1,26 @@
 facilities:
   nersc:
     base_url: "https://api.iri.nersc.gov"
+    tier: 1
     timeout: 60
   esnet-east:
     base_url: "https://iri-dev.ppg.es.net"
+    tier: 1
     timeout: 60
   esnet-west:
     base_url: "https://esnet-west.sdn-sense.net"
+    tier: 1
     timeout: 60
   alcf:
     base_url: "https://api.alcf.anl.gov"
+    tier: 1
     timeout: 60
   # SENSE-O East orchestrator — RIG exchanges the caller's Globus Bearer token
   # for a SENSE-O access token via RFC 8693 before proxying upstream.
   # To obtain the client credentials, contact xiyang@es.net.
   orchestrator:
     base_url: "https://sense-o-east.es.net:8543"
+    tier: 2
     timeout: 60
     token_exchange:
       auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"

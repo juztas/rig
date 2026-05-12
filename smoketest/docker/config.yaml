@@ -1,6 +1,7 @@
 facilities:
   echo:
     base_url: "http://echo:8080"
+    tier: 3
     timeout: 30
 
 max_connections: 100

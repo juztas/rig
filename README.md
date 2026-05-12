@@ -134,18 +134,23 @@ Settings are loaded in this priority order:
 facilities:
   nersc:
     base_url: "https://api.iri.nersc.gov"
+    tier: 1
     timeout: 60
   esnet-east:
     base_url: "https://iri-dev.ppg.es.net"
+    tier: 1
     timeout: 60
   esnet-west:
     base_url: "https://esnet-west.sdn-sense.net"
+    tier: 1
     timeout: 60
   alcf:
     base_url: "https://api.alcf.anl.gov"
+    tier: 1
     timeout: 60
   orchestrator:
     base_url: "https://sense-o-east.es.net:8543"
+    tier: 2
     timeout: 60
     token_exchange:
       auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"
@@ -169,7 +174,7 @@ For the SENSE-O orchestrator client credentials, contact `xiyang@es.net`.
 
 | Setting | Env var | Default | Description |
 |---------|---------|---------|-------------|
-| `facilities` | `RIG_FACILITIES` (JSON) | `{}` | Map of facility name to `{base_url, timeout}` |
+| `facilities` | `RIG_FACILITIES` (JSON) | `{}` | Map of facility name to `{base_url, timeout, optional tier, optional token_exchange}` |
 | `max_connections` | `RIG_MAX_CONNECTIONS` | `1000` | Max concurrent upstream connections per worker |
 | `max_keepalive_connections` | `RIG_MAX_KEEPALIVE_CONNECTIONS` | `100` | Keep-alive pool size per worker |
 | `default_timeout` | `RIG_DEFAULT_TIMEOUT` | `60` | Default upstream request timeout (seconds) |
@@ -188,9 +193,9 @@ For the SENSE-O orchestrator client credentials, contact `xiyang@es.net`.
 
 ## Identity Resolution
 
-RIG resolves credentials in two tiers, evaluated in order. The first tier that
-returns a token wins; if all tiers fail, the original `Authorization` header is
-passed through unchanged.
+RIG resolves identity through three tiers. The first tier that yields a usable
+upstream bearer wins; if the exchange and vault paths both fail, the original
+`Authorization` header is passed through unchanged.
 
 ### Tier 1 -- Pass-through (default)
 
@@ -200,7 +205,29 @@ same Globus token accepted by both Kong and the IRI endpoint).
 
 No configuration required. This is the default when no vault backend is set.
 
-### Tier 2 -- Vaulted Credentials
+### Tier 2 -- Token Exchange
+
+Facilities with a `token_exchange` block use RFC 8693 to swap the caller's
+incoming bearer token for a facility-local access token before proxying
+upstream. This is how the shipped `orchestrator` facility is configured.
+
+Use the optional `tier` field to make that contract explicit in config:
+
+```yaml
+facilities:
+  orchestrator:
+    base_url: "https://sense-o-east.es.net:8543"
+    tier: 2
+    timeout: 60
+    token_exchange:
+      auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"
+      client_id: "${RIG_ORCHESTRATOR_CLIENT_ID}"
+      client_secret: "${RIG_ORCHESTRATOR_CLIENT_SECRET}"
+      subject_issuer: "https://auth.globus.org"
+      verify_tls: false
+```
+
+### Tier 3 -- Vaulted Credentials
 
 Pre-stored, per-user, per-project, per-facility credentials retrieved from a
 local Docker config file, Kubernetes Secrets, or AWS Secrets Manager. This is
@@ -247,18 +274,23 @@ Example:
 facilities:
   nersc:
     base_url: "https://api.iri.nersc.gov"
+    tier: 3
     timeout: 60
   esnet-east:
     base_url: "https://iri-dev.ppg.es.net"
+    tier: 3
     timeout: 60
   esnet-west:
     base_url: "https://esnet-west.sdn-sense.net"
+    tier: 3
     timeout: 60
   alcf:
     base_url: "https://api.alcf.anl.gov"
+    tier: 3
     timeout: 60
   orchestrator:
     base_url: "https://sense-o-east.es.net:8543"
+    tier: 2
     timeout: 60
     token_exchange:
       auth_endpoint: "https://sense-o-east.es.net:8543/realms/StackV/protocol/openid-connect/token"
@@ -499,7 +531,7 @@ path after the facility segment, for example `/api/v1/facility` or
 | Header | Required | Description |
 |--------|----------|-------------|
 | `Authorization` | Yes (for authenticated endpoints) | Bearer token, forwarded upstream |
-| `X-Project` | For Tier 2 vault lookup | Project identifier for credential resolution |
+| `X-Project` | Required for Tier 3 vault lookup; optional otherwise | Project identifier for credential resolution |
 
 **Examples:**
 
