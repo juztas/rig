@@ -92,6 +92,18 @@ async def test_resolve_identity_uses_precomputed_subject():
 
 
 @pytest.mark.asyncio
+async def test_resolve_identity_uses_enclave_specific_docker_credentials():
+    settings = Settings(
+        facilities={"secure-fac": FacilityConfig(base_url="https://upstream.example", vault_enclave="moderate")},
+        vault_backend="docker",
+        docker_credentials={"u": {"p": {"moderate": {"secure-fac": "moderate-token"}}}},
+    )
+    async with httpx.AsyncClient() as client:
+        result = await resolve_identity("Bearer abc123", "secure-fac", "p", client, settings, user_identity="u")
+    assert result == ("Bearer moderate-token", "vault")
+
+
+@pytest.mark.asyncio
 async def test_kube_client_initialized_once(monkeypatch):
     calls = {"load": 0, "api_client": 0, "core_v1": 0}
 
@@ -144,6 +156,15 @@ def test_extract_subject_from_userinfo():
     assert _extract_subject_from_userinfo(payload) == "userinfo-user"
 
 
+def test_extract_act_serializes_structured_claim():
+    import base64
+    import json
+
+    payload = base64.urlsafe_b64encode(json.dumps({"act": {"sub": "broker", "client_id": "gw"}}).encode()).rstrip(b"=").decode()
+    token = f"Bearer header.{payload}.sig"
+    assert identity_mod._extract_act(token) == '{"client_id":"gw","sub":"broker"}'
+
+
 @pytest.mark.asyncio
 async def test_policy_stub_allows_all():
     settings = Settings(facilities={})
@@ -158,6 +179,8 @@ def test_settings_defaults():
     assert settings.default_timeout == 60.0
     assert settings.vault_backend == ""
     assert settings.policy_engine_url == ""
+    assert settings.reauth_sns_topic_arn == ""
+    assert settings.reauth_sqs_queue_url == ""
 
 
 class FakeUpstreamResponse:
@@ -202,6 +225,9 @@ async def test_client(monkeypatch):
     monkeypatch.setattr(proxy_mod, "settings", test_settings)
 
     app.state.http_client = SimpleNamespace(is_closed=False)
+    app.state.jwt_validator = SimpleNamespace(validate=lambda authorization: (True, None))
+    app.state.revocation_checker = SimpleNamespace(enabled=False)
+    app.state.reauth_publisher = SimpleNamespace(enabled=False)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
         base_url="http://test",
@@ -555,6 +581,136 @@ async def test_xamsc_traceability_headers_injected_upstream(test_client, monkeyp
     assert upstream_headers.get("x-amsc-trace-id"), "trace-id must be set"
 
 
+@pytest.mark.asyncio
+async def test_proxy_forwards_facility_project_header_when_mapping_exists(monkeypatch):
+    test_settings = Settings(
+        facilities={"test-facility": FacilityConfig(base_url="https://upstream.example")},
+        project_mappings={"a001": {"test-facility": "ns011"}},
+    )
+    monkeypatch.setattr(app_mod, "settings", test_settings)
+    monkeypatch.setattr(proxy_mod, "settings", test_settings)
+    upstream = FakeUpstreamResponse()
+    recording_client = RecordingHttpClient(upstream)
+    app.state.http_client = recording_client
+
+    async def fake_resolve_identity(*args, **kwargs):
+        return ("Bearer resolved", "passthrough")
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/test-facility/path",
+            headers={"authorization": "Bearer x", "x-project": "a001"},
+        )
+
+    assert response.status_code == 200
+    upstream_headers = recording_client.request_args["headers"]
+    assert upstream_headers["x-amsc-project"] == "a001"
+    assert upstream_headers["x-iri-facility-project"] == "ns011"
+
+
+@pytest.mark.asyncio
+async def test_proxy_omits_facility_project_header_without_mapping(monkeypatch):
+    test_settings = Settings(
+        facilities={"test-facility": FacilityConfig(base_url="https://upstream.example")},
+        project_mappings={"other": {"test-facility": "ns099"}},
+    )
+    monkeypatch.setattr(app_mod, "settings", test_settings)
+    monkeypatch.setattr(proxy_mod, "settings", test_settings)
+    upstream = FakeUpstreamResponse()
+    recording_client = RecordingHttpClient(upstream)
+    app.state.http_client = recording_client
+
+    async def fake_resolve_identity(*args, **kwargs):
+        return ("Bearer resolved", "passthrough")
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/test-facility/path",
+            headers={"authorization": "Bearer x", "x-project": "a001"},
+        )
+
+    assert response.status_code == 200
+    upstream_headers = recording_client.request_args["headers"]
+    assert upstream_headers["x-amsc-project"] == "a001"
+    assert "x-iri-facility-project" not in upstream_headers
+
+
+@pytest.mark.asyncio
+async def test_proxy_forwards_act_claim_upstream(test_client, monkeypatch):
+    import base64
+    import json as j
+
+    client, app, proxy_mod = test_client
+    upstream = FakeUpstreamResponse()
+    recording_client = RecordingHttpClient(upstream)
+    app.state.http_client = recording_client
+
+    async def fake_resolve_identity(*args, **kwargs):
+        return ("Bearer resolved", "passthrough")
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    payload = base64.urlsafe_b64encode(
+        j.dumps({"sub": "auid-42", "act": {"sub": "broker", "client_id": "portal"}}).encode()
+    ).rstrip(b"=").decode()
+    auth = f"Bearer eyJhbGciOiJub25lIn0.{payload}.sig"
+
+    response = await client.get("/test-facility/path", headers={"authorization": auth})
+    assert response.status_code == 200
+    assert recording_client.request_args["headers"]["x-amsc-act"] == '{"client_id":"portal","sub":"broker"}'
+
+
+@pytest.mark.asyncio
+async def test_proxy_forwards_enclave_header_when_facility_declares_one(monkeypatch):
+    test_settings = Settings(
+        facilities={"secure-fac": FacilityConfig(base_url="https://upstream.example", vault_enclave="moderate")}
+    )
+    monkeypatch.setattr(app_mod, "settings", test_settings)
+    monkeypatch.setattr(proxy_mod, "settings", test_settings)
+    upstream = FakeUpstreamResponse()
+    recording_client = RecordingHttpClient(upstream)
+    app.state.http_client = recording_client
+
+    async def fake_resolve_identity(*args, **kwargs):
+        return ("Bearer x", "passthrough")
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/secure-fac/path")
+    assert response.status_code == 200
+    assert recording_client.request_args["headers"]["x-amsc-enclave"] == "moderate"
+
+
 # --- structured audit log -----------------------------------------------
 
 @pytest.mark.asyncio
@@ -588,6 +744,38 @@ async def test_audit_log_emits_canonical_fields_on_allow(test_client, monkeypatc
     assert rec.sub == "auid-42"
     assert rec.jti == "jti-7"
     assert rec.project == "p1"
+
+
+@pytest.mark.asyncio
+async def test_audit_log_emits_act_and_enclave_when_present(monkeypatch, caplog):
+    test_settings = Settings(
+        facilities={"secure-fac": FacilityConfig(base_url="https://upstream.example", vault_enclave="moderate")}
+    )
+    monkeypatch.setattr(app_mod, "settings", test_settings)
+    monkeypatch.setattr(proxy_mod, "settings", test_settings)
+    app.state.http_client = RecordingHttpClient(FakeUpstreamResponse(status_code=200))
+
+    async def fake_resolve_identity(*args, **kwargs):
+        return ("Bearer resolved", "passthrough")
+
+    async def fake_is_allowed(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(proxy_mod, "resolve_identity", fake_resolve_identity)
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    caplog.set_level("INFO", logger="rig.proxy")
+    auth = _bearer_with_claims(sub="auid-42", act={"sub": "broker"})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/secure-fac/path", headers={"authorization": auth, "x-project": "p1"})
+    assert response.status_code == 200
+    audit_records = [r for r in caplog.records if getattr(r, "audit", False)]
+    rec = audit_records[0]
+    assert rec.enclave == "moderate"
+    assert rec.act == '{"sub":"broker"}'
 
 
 @pytest.mark.asyncio
@@ -1639,6 +1827,77 @@ async def test_proxy_returns_401_on_revoked_jti(test_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_proxy_publishes_reauth_event_on_401(monkeypatch):
+    from rig.config import FacilityConfig, JWTValidationConfig, Settings
+
+    test_settings = Settings(
+        facilities={"f": FacilityConfig(base_url="https://upstream.example")},
+        jwt_validation=JWTValidationConfig(enabled=True, jwks_url="https://idp/jwks.json"),
+        reauth_sns_topic_arn="arn:aws:sns:us-east-1:123456789012:reauth",
+    )
+    monkeypatch.setattr(app_mod, "settings", test_settings)
+    monkeypatch.setattr(proxy_mod, "settings", test_settings)
+    app.state.http_client = SimpleNamespace(is_closed=False)
+
+    class FakeValidator:
+        def validate(self, authorization):
+            return (False, "token_expired")
+
+    class FakePublisher:
+        enabled = True
+
+        def __init__(self):
+            self.events = []
+
+        async def publish_suspend_event(self, event):
+            self.events.append(event)
+            return True
+
+    app.state.jwt_validator = FakeValidator()
+    app.state.reauth_publisher = FakePublisher()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/f/anything", headers={"authorization": "Bearer expired"})
+    assert response.status_code == 401
+    assert len(app.state.reauth_publisher.events) == 1
+    event = app.state.reauth_publisher.events[0]
+    assert event["workflow_action"] == "suspend"
+    assert event["status"] == 401
+    assert event["reason"] == "token_invalid:token_expired"
+
+
+@pytest.mark.asyncio
+async def test_proxy_publishes_reauth_event_on_403_policy_deny(test_client, monkeypatch):
+    client, app, proxy_mod = test_client
+    app.state.http_client = RecordingHttpClient(FakeUpstreamResponse())
+
+    class FakePublisher:
+        enabled = True
+
+        def __init__(self):
+            self.events = []
+
+        async def publish_suspend_event(self, event):
+            self.events.append(event)
+            return True
+
+    app.state.reauth_publisher = FakePublisher()
+
+    async def fake_is_allowed(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(proxy_mod, "is_allowed", fake_is_allowed)
+
+    response = await client.get("/test-facility/secure", headers={"authorization": _bearer_with_claims(sub="u1")})
+    assert response.status_code == 403
+    assert len(app.state.reauth_publisher.events) == 1
+    assert app.state.reauth_publisher.events[0]["reason"] == "policy"
+
+
+@pytest.mark.asyncio
 async def test_proxy_skips_revocation_when_disabled(test_client, monkeypatch):
     client, app, proxy_mod = test_client
     app.state.http_client = RecordingHttpClient(FakeUpstreamResponse())
@@ -1921,6 +2180,35 @@ async def test_admin_blocklist_returns_503_when_redis_unavailable(monkeypatch):
             headers={"authorization": "Bearer t"},
         )
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_reauth_publisher_writes_to_sns_and_sqs():
+    from rig.reauth import ReauthPublisher
+
+    calls = {"sns": [], "sqs": []}
+
+    class StubSNS:
+        def publish(self, **kwargs):
+            calls["sns"].append(kwargs)
+            return {"MessageId": "m1"}
+
+    class StubSQS:
+        def send_message(self, **kwargs):
+            calls["sqs"].append(kwargs)
+            return {"MessageId": "m2"}
+
+    publisher = ReauthPublisher(
+        sns_topic_arn="arn:aws:sns:us-east-1:123456789012:reauth",
+        sqs_queue_url="https://sqs.us-east-1.amazonaws.com/123456789012/reauth",
+    )
+    publisher._sns_client = StubSNS()
+    publisher._sqs_client = StubSQS()
+
+    ok = await publisher.publish_suspend_event({"event": "reauth_required", "status": 401})
+    assert ok is True
+    assert len(calls["sns"]) == 1
+    assert len(calls["sqs"]) == 1
 
 
 @pytest.mark.asyncio

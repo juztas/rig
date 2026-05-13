@@ -165,6 +165,20 @@ def _extract_idp(authorization: str | None) -> str | None:
     return None
 
 
+def _extract_act(authorization: str | None) -> str | None:
+    """Extract the JWT ``act`` claim and return a stable string representation."""
+    payload = _decode_jwt_payload(authorization)
+    if not payload or "act" not in payload:
+        return None
+    value = payload["act"]
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _extract_subject_from_userinfo(userinfo_header: str | None) -> str | None:
     """Extract the trusted user subject from Kong's base64-encoded X-Userinfo header."""
     if not userinfo_header:
@@ -273,10 +287,11 @@ async def resolve_identity(
     The mechanism is reported back to the proxy so it can label the upstream
     request with ``X-AmSC-Exchange-Status`` and emit accurate audit records.
     """
+    facility_config = settings.facilities.get(facility)
     cache = exchange_cache if exchange_cache is not None else _default_exchange_cache
+    vault_enclave = facility_config.vault_enclave if facility_config else None
 
     # Tier 2 — RFC 8693 token exchange takes priority (e.g. Globus → SENSE-O).
-    facility_config = settings.facilities.get(facility)
     if facility_config and facility_config.token_exchange and authorization:
         sub_for_cache = user_identity if user_identity is not None else _extract_subject(authorization)
         result = await exchange_token(
@@ -307,7 +322,7 @@ async def resolve_identity(
                     extra={"facility": facility, "user": user, "project": project, "reason": reason},
                 )
             else:
-                result = await _vault_lookup(user, project, facility, settings)
+                result = await _vault_lookup(user, project, facility, settings, enclave=vault_enclave)
                 if result is not None:
                     fingerprint = _credential_fingerprint(result)
                     if settings.vault_pool_detect:
@@ -354,17 +369,30 @@ async def _vault_lookup(
     project: str,
     facility: str,
     settings: Settings,
+    enclave: str | None = None,
 ) -> str | None:
     """Dispatch to the configured vault backend (kube, aws, or docker)."""
     if settings.vault_backend == "kube":
-        return await _vault_kube(user, project, facility, settings)
+        return await _vault_kube(user, project, facility, settings, enclave=enclave)
     elif settings.vault_backend == "aws":
-        return await _vault_aws(user, project, facility, settings)
+        return await _vault_aws(user, project, facility, settings, enclave=enclave)
     elif settings.vault_backend == "docker":
-        return await _vault_docker(user, project, facility, settings)
+        return await _vault_docker(user, project, facility, settings, enclave=enclave)
     else:
         logger.error("Unknown vault_backend: %s", settings.vault_backend)
         return None
+
+
+def _vault_locator(settings: Settings, enclave: str | None) -> tuple[str, str, str]:
+    """Resolve the effective ``(secret_prefix, kube_namespace, aws_region)`` for a vault lookup."""
+    secret_prefix = settings.vault_secret_prefix
+    kube_namespace = settings.vault_kube_namespace
+    aws_region = settings.vault_aws_region
+    if enclave:
+        secret_prefix = settings.vault_secret_prefix_by_enclave.get(enclave, secret_prefix)
+        kube_namespace = settings.vault_kube_namespace_by_enclave.get(enclave, kube_namespace)
+        aws_region = settings.vault_aws_region_by_enclave.get(enclave, aws_region)
+    return secret_prefix, kube_namespace, aws_region
 
 
 async def _vault_kube(
@@ -372,12 +400,14 @@ async def _vault_kube(
     project: str,
     facility: str,
     settings: Settings,
+    enclave: str | None = None,
 ) -> str | None:
     """Read a facility credential from a Kubernetes Secret."""
-    secret_name = f"{settings.vault_secret_prefix}-{user}-{project}-{facility}"
+    secret_prefix, kube_namespace, _ = _vault_locator(settings, enclave)
+    secret_name = f"{secret_prefix}-{user}-{project}-{facility}"
     try:
         v1 = await _get_kube_v1_api()
-        secret = await v1.read_namespaced_secret(secret_name, settings.vault_kube_namespace)
+        secret = await v1.read_namespaced_secret(secret_name, kube_namespace)
         if secret.data and "token" in secret.data:
             token = base64.b64decode(secret.data["token"]).decode()
             logger.debug("Read token from kube secret %s", secret_name)
@@ -393,12 +423,14 @@ async def _vault_aws(
     project: str,
     facility: str,
     settings: Settings,
+    enclave: str | None = None,
 ) -> str | None:
     """Read a facility credential from AWS Secrets Manager."""
-    secret_id = f"{settings.vault_secret_prefix}/{user}/{project}/{facility}"
+    secret_prefix, _, aws_region = _vault_locator(settings, enclave)
+    secret_id = f"{secret_prefix}/{user}/{project}/{facility}"
     try:
         loop = asyncio.get_running_loop()
-        sm = _get_secrets_manager_client(settings.vault_aws_region)
+        sm = _get_secrets_manager_client(aws_region)
         resp = await loop.run_in_executor(
             None,
             functools.partial(sm.get_secret_value, SecretId=secret_id),
@@ -421,9 +453,15 @@ async def _vault_docker(
     project: str,
     facility: str,
     settings: Settings,
+    enclave: str | None = None,
 ) -> str | None:
     """Read a facility credential from the in-config docker_credentials map (local testing only)."""
-    token = settings.docker_credentials.get(user, {}).get(project, {}).get(facility)
+    project_map = settings.docker_credentials.get(user, {}).get(project, {})
+    token = project_map.get(facility)
+    if token is None and enclave:
+        enclave_map = project_map.get(enclave)
+        if isinstance(enclave_map, dict):
+            token = enclave_map.get(facility)
     if token:
         logger.debug("Read token from docker credentials for user=%s project=%s facility=%s", user, project, facility)
         return f"Bearer {token}" if not token.startswith("Bearer ") else token

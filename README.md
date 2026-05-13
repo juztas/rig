@@ -41,6 +41,7 @@ rig/
   proxy.py           Wildcard route /{facility}/{path:path};
                      OTel span wrapper; project-mismatch / tier-3 fail-closed;
                      IP-allowlist gate; upstream header injection;
+                     401/403 re-auth publish hook;
                      differentiated 401 (HTML 302 vs JSON challenge)
   admin.py           /admin/blocklist — push a jti to the revocation blocklist
   identity.py        resolve_identity() chain: exchange → vault → passthrough;
@@ -57,6 +58,7 @@ rig/
   policy.py          Optional external policy-engine HTTP hook
   config.py          pydantic-settings YAML loader; FacilityConfig +
                      TokenExchangeConfig + JWTValidationConfig + resolve_tier()
+  reauth.py          Optional SNS/SQS publisher for workflow-suspend re-auth events
   headers.py         Hop-by-hop header filtering
   logging.py         Structured JSON logging surfacing every extra= field
 ```
@@ -94,7 +96,8 @@ no-op when the corresponding configuration knob is absent.
    Denied → 403.
 10. **Header build** — strip hop-by-hop; preserve `X-Forwarded-*`; inject
     `X-AmSC-Trace-Id / -User / -Project`, plus `X-AmSC-Auth-Time / -Amr / -Acr /
-    -Idp` when the JWT carries those claims, plus `X-AmSC-Exchange-Status`
+    -Idp / -Act`, plus `X-AmSC-Enclave` when the facility declares a Tier-3 enclave,
+    plus `X-AmSC-Exchange-Status`
     (Completed / Vaulted) when the identity resolver swapped the bearer.
     Re-inject the outbound `traceparent`.
 11. **Stream to upstream** — full method / path / query / headers / body
@@ -103,8 +106,11 @@ no-op when the corresponding configuration knob is absent.
 12. **Stream response back** — preserve upstream status / headers / body;
     append `X-Request-Id` and `X-Upstream-Latency-Ms`.
 13. **Audit log** — single `rig.audit` line per request with `decision`,
-    `status`, `facility`, `tier`, `sub`, `jti`, `project`, `method`, `path`,
-    `latency_ms`, `resolution_mechanism`, `trace_id`, `span_id`.
+    `status`, `facility`, `tier`, `sub`, `jti`, `project`, `enclave`, `act`,
+    `method`, `path`, `latency_ms`, `resolution_mechanism`, `trace_id`, `span_id`.
+14. **Re-auth publish (optional)** — on 401/403 deny paths, emit a
+    workflow-suspend event to SNS and/or SQS so external orchestrators can
+    pause work and prompt the caller to re-authenticate.
 
 ### Statelessness
 
@@ -184,10 +190,17 @@ For the SENSE-O orchestrator client credentials, contact `xiyang@es.net`.
 | `log_level` | `RIG_LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
 | `vault_backend` | `RIG_VAULT_BACKEND` | `""` | Vault backend: `docker`, `kube`, or `aws` |
 | `docker_credentials` | `RIG_DOCKER_CREDENTIALS` (JSON) | `{}` | Local test credential map: `user -> project -> facility -> token` |
+| `project_mappings` | `RIG_PROJECT_MAPPINGS` (JSON) | `{}` | AmSC project -> facility -> facility-native project/account identifier |
 | `vault_kube_namespace` | `RIG_VAULT_KUBE_NAMESPACE` | `default` | Kubernetes namespace for secret lookup |
 | `vault_aws_region` | `RIG_VAULT_AWS_REGION` | `us-east-1` | AWS region for Secrets Manager |
 | `vault_secret_prefix` | `RIG_VAULT_SECRET_PREFIX` | `rig-creds` | Prefix for secret names |
+| `vault_kube_namespace_by_enclave` | `RIG_VAULT_KUBE_NAMESPACE_BY_ENCLAVE` (JSON) | `{}` | Optional kube namespace overrides keyed by enclave, e.g. `{"open":"rig-open","moderate":"rig-moderate"}` |
+| `vault_aws_region_by_enclave` | `RIG_VAULT_AWS_REGION_BY_ENCLAVE` (JSON) | `{}` | Optional AWS region overrides keyed by enclave |
+| `vault_secret_prefix_by_enclave` | `RIG_VAULT_SECRET_PREFIX_BY_ENCLAVE` (JSON) | `{}` | Optional secret-prefix overrides keyed by enclave |
 | `policy_engine_url` | `RIG_POLICY_ENGINE_URL` | `""` | External policy engine URL (OPA/Cedar) |
+| `reauth_sns_topic_arn` | `RIG_REAUTH_SNS_TOPIC_ARN` | `""` | Optional SNS topic for workflow-suspend / re-auth events on 401/403 |
+| `reauth_sqs_queue_url` | `RIG_REAUTH_SQS_QUEUE_URL` | `""` | Optional SQS queue for workflow-suspend / re-auth events on 401/403 |
+| `reauth_aws_region` | `RIG_REAUTH_AWS_REGION` | `us-east-1` | AWS region used for SNS/SQS publishing |
 
 ---
 
@@ -243,6 +256,23 @@ verified the token). The project is read from the `X-Project` request header.
 Both **user** and **project** must be present for vault lookup to proceed. If
 either is missing, RIG logs a warning and falls back to pass-through.
 
+When a facility-native project/account identifier differs from the AmSC project
+id, configure `project_mappings` so RIG can preserve `X-AmSC-Project` and also
+forward `X-IRI-Facility-Project` to the upstream IRI implementation:
+
+```yaml
+project_mappings:
+  a001:
+    nersc: "ns011"
+    alcf: "AmSC_Demos"
+    olcf: "olcf112"
+    esnet-east: "proj01"
+```
+
+Facilities can also declare a `vault_enclave` to steer Tier-3 lookups toward an
+enclave-specific secret prefix / Kubernetes namespace / AWS region when the
+matching `*_by_enclave` settings are configured.
+
 #### Storing Tokens in a Local Docker Config File
 
 Enable with:
@@ -275,10 +305,12 @@ facilities:
   nersc:
     base_url: "https://api.iri.nersc.gov"
     tier: 3
+    vault_enclave: "open"
     timeout: 60
   esnet-east:
     base_url: "https://iri-dev.ppg.es.net"
     tier: 3
+    vault_enclave: "moderate"
     timeout: 60
   esnet-west:
     base_url: "https://esnet-west.sdn-sense.net"
@@ -300,11 +332,16 @@ facilities:
       verify_tls: false
 
 vault_backend: docker
+vault_secret_prefix_by_enclave:
+  open: "rig-creds-open"
+  moderate: "rig-creds-moderate"
 docker_credentials:
   alice:
     m3795:
-      nersc: "alice_nersc_token"
-      esnet-east: "alice_esnet_east_token"
+      open:
+        nersc: "alice_nersc_token"
+      moderate:
+        esnet-east: "alice_esnet_east_token"
       esnet-west: "alice_esnet_west_token"
       alcf: "alice_alcf_token"
   bob:
@@ -323,6 +360,10 @@ With that config:
 - Requests from JWT subject `bob` with `X-Project: irisandbox` use Bob's facility token.
 - If a matching user, project, or facility entry is missing, RIG falls back to
   pass-through and forwards the original `Authorization` header.
+
+When a facility also declares `vault_enclave`, rig first checks the enclave-specific
+credential map / secret prefix / namespace / region overrides before falling back
+to the default vault location for that backend.
 
 #### Storing Tokens in Kubernetes Secrets
 

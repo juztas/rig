@@ -66,6 +66,8 @@ def set_audit_attributes(
     sub: str | None = None,
     jti: str | None = None,
     project: str | None = None,
+    enclave: str | None = None,
+    act: str | None = None,
     decision: str | None = None,
     status: int | None = None,
     reason: str | None = None,
@@ -84,6 +86,10 @@ def set_audit_attributes(
         attrs["rig.jti"] = jti
     if project:
         attrs["rig.project"] = project
+    if enclave:
+        attrs["rig.enclave"] = enclave
+    if act:
+        attrs["rig.act"] = act
     if decision:
         attrs["rig.decision"] = decision
     if status is not None:

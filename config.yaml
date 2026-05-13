@@ -40,6 +40,12 @@ workers: 4
 # Docker / local-testing credential store.
 # Set vault_backend: docker to enable. Tokens are looked up by user -> project -> facility.
 # vault_backend: docker
+# project_mappings:
+#   a001:
+#     nersc: "ns011"
+#     alcf: "AmSC_Demos"
+#     olcf: "olcf112"
+#     esnet-east: "proj01"
 # docker_credentials:
 #   alice:
 #     project1:
@@ -48,3 +54,14 @@ workers: 4
 #   bob:
 #     project2:
 #       nersc: "nersc_token_for_bob"
+
+# Optional enclave-aware Tier-3 overrides:
+# vault_secret_prefix_by_enclave:
+#   open: "rig-creds-open"
+#   moderate: "rig-creds-moderate"
+# vault_kube_namespace_by_enclave:
+#   moderate: "rig-moderate"
+
+# Optional workflow-suspend / re-auth publish hook for 401/403 deny paths:
+# reauth_sns_topic_arn: "arn:aws:sns:us-east-1:123456789012:rig-reauth"
+# reauth_sqs_queue_url: "https://sqs.us-east-1.amazonaws.com/123456789012/rig-reauth"

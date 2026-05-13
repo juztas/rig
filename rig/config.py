@@ -78,6 +78,10 @@ class FacilityConfig(BaseModel):
     # infers it: token_exchange present -> 2; else (if global vault_backend is set) -> 3;
     # else -> 1. Set explicitly to surface the contract clearly in logs and admin tooling.
     tier: int | None = None
+    # Optional enclave selector for Tier-3 vault lookups. When set to values like
+    # ``open`` or ``moderate``, rig chooses enclave-specific vault prefixes /
+    # namespaces / regions when the corresponding settings are configured.
+    vault_enclave: str | None = None
 
 
 def resolve_tier(facility: "FacilityConfig", vault_backend: str) -> int:
@@ -116,8 +120,13 @@ class Settings(BaseSettings):
     vault_kube_namespace: str = "default"
     vault_aws_region: str = "us-east-1"
     vault_secret_prefix: str = "rig-creds"  # k8s: {prefix}-{user}-{project}-{facility}, AWS: {prefix}/{user}/{project}/{facility}
+    vault_kube_namespace_by_enclave: dict[str, str] = {}
+    vault_aws_region_by_enclave: dict[str, str] = {}
+    vault_secret_prefix_by_enclave: dict[str, str] = {}
     # docker backend: flat credential map for local testing — user -> project -> facility -> token
-    docker_credentials: dict[str, dict[str, dict[str, str]]] = {}
+    docker_credentials: dict[str, dict[str, dict[str, Any]]] = {}
+    # AmSC project -> facility -> facility-native project/account identifier.
+    project_mappings: dict[str, dict[str, str]] = {}
     policy_engine_url: str = ""
 
     # Maximum allowed age (seconds) of the inbound JWT's ``auth_time`` claim before
@@ -172,6 +181,13 @@ class Settings(BaseSettings):
     # Empty (default) disables the routes entirely. Operators can rotate this
     # via the RIG_ADMIN_API_TOKEN env var without restarting other components.
     admin_api_token: str = ""
+
+    # Re-auth / workflow-suspend publisher (RFC Section 3B fallback loop). When
+    # either destination is configured, rig emits an event on 401/403 deny paths
+    # so external workflow coordinators can suspend work and trigger re-auth.
+    reauth_sns_topic_arn: str = ""
+    reauth_sqs_queue_url: str = ""
+    reauth_aws_region: str = "us-east-1"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

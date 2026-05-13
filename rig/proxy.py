@@ -1,6 +1,7 @@
 """Wildcard reverse-proxy route that streams requests to upstream facility APIs."""
 
 import ipaddress
+import json
 import time
 
 import httpx
@@ -15,6 +16,7 @@ from .identity import (
     TRUSTED_USERINFO_HEADER,
     _decode_jwt_payload,
     _extract_acr,
+    _extract_act,
     _extract_amr,
     _extract_auth_time,
     _extract_idp,
@@ -44,6 +46,13 @@ def _merge_forwarded_prefix(existing_prefix: str | None, facility: str) -> str:
     prefix = (existing_prefix or "").split(",")[0].strip().rstrip("/")
     facility_prefix = f"/{facility}"
     return f"{prefix}{facility_prefix}" if prefix else facility_prefix
+
+
+def _resolve_facility_project(project: str | None, facility: str) -> str | None:
+    """Map an AmSC project id to the facility-native project/account identifier."""
+    if not project:
+        return None
+    return settings.project_mappings.get(project, {}).get(facility)
 
 
 def _client_ip(request: Request) -> str | None:
@@ -100,6 +109,8 @@ def _audit(
     sub: str | None,
     jti: str | None,
     project: str | None,
+    enclave: str | None,
+    act: str | None,
     method: str,
     path: str,
     latency_ms: int | None = None,
@@ -125,6 +136,8 @@ def _audit(
         "sub": sub,
         "jti": jti,
         "project": project,
+        "enclave": enclave,
+        "act": act,
         "method": method,
         "path": path,
         "latency_ms": latency_ms,
@@ -141,12 +154,59 @@ def _audit(
         sub=sub,
         jti=jti,
         project=project,
+        enclave=enclave,
+        act=act,
         decision=decision,
         status=status,
         reason=reason,
         resolution_mechanism=resolution_mechanism,
     )
     logger.info("rig.audit", extra=extra)
+
+
+async def _publish_reauth_if_needed(
+    request: Request,
+    *,
+    status: int,
+    facility: str,
+    tier: int | None,
+    sub: str | None,
+    jti: str | None,
+    project: str | None,
+    enclave: str | None,
+    act: str | None,
+    method: str,
+    path: str,
+    reason: str | None,
+) -> None:
+    """Best-effort publish of workflow-suspend events for 401/403 deny paths."""
+    if status not in (401, 403):
+        return
+    publisher = getattr(request.app.state, "reauth_publisher", None)
+    if publisher is None or not publisher.enabled:
+        return
+    ids = current_trace_ids()
+    event = {
+        "event": "reauth_required",
+        "workflow_action": "suspend",
+        "request_id": request_id_var.get("-"),
+        "status": status,
+        "facility": facility,
+        "tier": tier,
+        "sub": sub,
+        "jti": jti,
+        "project": project,
+        "enclave": enclave,
+        "act": act,
+        "method": method,
+        "path": path,
+        "reason": reason,
+        "challenge_uri": settings.auth_device_flow_uri or None,
+        "trace_id": ids[0] if ids else None,
+        "span_id": ids[1] if ids else None,
+        "timestamp": int(time.time()),
+    }
+    await publisher.publish_suspend_event(event)
 
 
 def _wants_html(request: Request) -> bool:
@@ -212,6 +272,8 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
             sub=None,
             jti=None,
             project=None,
+            enclave=None,
+            act=None,
             method=method,
             path=path,
             reason="unknown_facility",
@@ -222,6 +284,7 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
         )
 
     tier = resolve_tier(facility_config, settings.vault_backend)
+    vault_enclave = facility_config.vault_enclave
 
     authorization = request.headers.get("authorization")
     if not authorization:
@@ -239,6 +302,7 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
     if jwt_validator is not None and settings.jwt_validation.enabled:
         valid, reason = jwt_validator.validate(authorization)
         if not valid:
+            act = _extract_act(authorization)
             _audit(
                 decision="deny",
                 status=401,
@@ -247,6 +311,22 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
                 sub=_extract_subject(authorization),
                 jti=_extract_jti(authorization),
                 project=request.headers.get("x-project"),
+                enclave=vault_enclave,
+                act=act,
+                method=method,
+                path=path,
+                reason=f"token_invalid:{reason}",
+            )
+            await _publish_reauth_if_needed(
+                request,
+                status=401,
+                facility=facility,
+                tier=tier,
+                sub=_extract_subject(authorization),
+                jti=_extract_jti(authorization),
+                project=request.headers.get("x-project"),
+                enclave=vault_enclave,
+                act=act,
                 method=method,
                 path=path,
                 reason=f"token_invalid:{reason}",
@@ -266,6 +346,7 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
         if jti_for_revocation:
             revoked, source = await revocation_checker.is_revoked(jti_for_revocation)
             if revoked:
+                act = _extract_act(authorization)
                 _audit(
                     decision="deny",
                     status=401,
@@ -274,6 +355,22 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
                     sub=_extract_subject(authorization),
                     jti=jti_for_revocation,
                     project=request.headers.get("x-project"),
+                    enclave=vault_enclave,
+                    act=act,
+                    method=method,
+                    path=path,
+                    reason=f"revoked:{source}",
+                )
+                await _publish_reauth_if_needed(
+                    request,
+                    status=401,
+                    facility=facility,
+                    tier=tier,
+                    sub=_extract_subject(authorization),
+                    jti=jti_for_revocation,
+                    project=request.headers.get("x-project"),
+                    enclave=vault_enclave,
+                    act=act,
                     method=method,
                     path=path,
                     reason=f"revoked:{source}",
@@ -293,6 +390,7 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
     ):
         ip = _client_ip(request)
         if not _ip_in_allowlist(ip, settings.service_account_allowed_cidrs):
+            act = _extract_act(authorization)
             _audit(
                 decision="deny",
                 status=403,
@@ -301,6 +399,22 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
                 sub=_extract_subject(authorization),
                 jti=_extract_jti(authorization),
                 project=request.headers.get("x-project"),
+                enclave=vault_enclave,
+                act=act,
+                method=method,
+                path=path,
+                reason="service_token_outside_cidr",
+            )
+            await _publish_reauth_if_needed(
+                request,
+                status=403,
+                facility=facility,
+                tier=tier,
+                sub=_extract_subject(authorization),
+                jti=_extract_jti(authorization),
+                project=request.headers.get("x-project"),
+                enclave=vault_enclave,
+                act=act,
                 method=method,
                 path=path,
                 reason="service_token_outside_cidr",
@@ -315,6 +429,7 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
 
     project_header = request.headers.get("x-project")
     project_claim = _extract_project_context(authorization)
+    act_claim = _extract_act(authorization)
 
     # ZT-REQ-04 / RFC Section 3F "Token-Based Context Derivation": if both the X-Project header
     # and the JWT amsc_project_context claim are present, they MUST agree.
@@ -328,6 +443,22 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
             sub=sub_for_audit,
             jti=_extract_jti(authorization),
             project=project_header,
+            enclave=vault_enclave,
+            act=act_claim,
+            method=method,
+            path=path,
+            reason="project_mismatch",
+        )
+        await _publish_reauth_if_needed(
+            request,
+            status=403,
+            facility=facility,
+            tier=tier,
+            sub=sub_for_audit,
+            jti=_extract_jti(authorization),
+            project=project_header,
+            enclave=vault_enclave,
+            act=act_claim,
             method=method,
             path=path,
             reason="project_mismatch",
@@ -356,6 +487,8 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
             sub=sub_for_audit,
             jti=_extract_jti(authorization),
             project=None,
+            enclave=vault_enclave,
+            act=act_claim,
             method=method,
             path=path,
             reason="missing_project_for_tier3",
@@ -392,6 +525,22 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
             sub=user_identity,
             jti=jti,
             project=project,
+            enclave=vault_enclave,
+            act=act_claim,
+            method=method,
+            path=path,
+            reason="policy",
+        )
+        await _publish_reauth_if_needed(
+            request,
+            status=403,
+            facility=facility,
+            tier=tier,
+            sub=user_identity,
+            jti=jti,
+            project=project,
+            enclave=vault_enclave,
+            act=act_claim,
             method=method,
             path=path,
             reason="policy",
@@ -411,6 +560,13 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
         upstream_headers["x-amsc-user"] = user_identity
     if project:
         upstream_headers["x-amsc-project"] = project
+    facility_project = _resolve_facility_project(project, facility)
+    if facility_project:
+        upstream_headers["x-iri-facility-project"] = facility_project
+    if vault_enclave:
+        upstream_headers["x-amsc-enclave"] = vault_enclave
+    if act_claim:
+        upstream_headers["x-amsc-act"] = act_claim
 
     # Authentication-context claims forwarded for facilities that enforce session
     # freshness or origin-IdP policy locally (RFC Section 3F "Session Freshness").
@@ -459,16 +615,16 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
         upstream_resp = await http_client.send(upstream_req, stream=True)
     except httpx.TimeoutException:
         latency_ms = (time.monotonic() - t0) * 1000
-        _audit(decision="error", status=504, facility=facility, tier=tier, sub=user_identity, jti=jti, project=project, method=method, path=path, latency_ms=int(latency_ms), reason="upstream_timeout")
+        _audit(decision="error", status=504, facility=facility, tier=tier, sub=user_identity, jti=jti, project=project, enclave=vault_enclave, act=act_claim, method=method, path=path, latency_ms=int(latency_ms), reason="upstream_timeout")
         return JSONResponse(status_code=504, content={"error": "Upstream timeout"})
     except httpx.ConnectError:
         latency_ms = (time.monotonic() - t0) * 1000
-        _audit(decision="error", status=502, facility=facility, tier=tier, sub=user_identity, jti=jti, project=project, method=method, path=path, latency_ms=int(latency_ms), reason="upstream_connect")
+        _audit(decision="error", status=502, facility=facility, tier=tier, sub=user_identity, jti=jti, project=project, enclave=vault_enclave, act=act_claim, method=method, path=path, latency_ms=int(latency_ms), reason="upstream_connect")
         return JSONResponse(status_code=502, content={"error": "Cannot connect to upstream"})
     except Exception:
         latency_ms = (time.monotonic() - t0) * 1000
         logger.exception("Upstream error", extra={"facility": facility, "path": path, "method": method, "latency_ms": int(latency_ms)})
-        _audit(decision="error", status=502, facility=facility, tier=tier, sub=user_identity, jti=jti, project=project, method=method, path=path, latency_ms=int(latency_ms), reason="upstream_exception")
+        _audit(decision="error", status=502, facility=facility, tier=tier, sub=user_identity, jti=jti, project=project, enclave=vault_enclave, act=act_claim, method=method, path=path, latency_ms=int(latency_ms), reason="upstream_exception")
         return JSONResponse(status_code=502, content={"error": "Upstream error"})
 
     latency_ms = (time.monotonic() - t0) * 1000
@@ -481,6 +637,8 @@ async def _proxy_impl(facility: str, path: str, request: Request) -> Response:
         sub=user_identity,
         jti=jti,
         project=project,
+        enclave=vault_enclave,
+        act=act_claim,
         method=method,
         path=path,
         latency_ms=int(latency_ms),

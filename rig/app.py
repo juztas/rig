@@ -13,6 +13,7 @@ from .config import resolve_tier, settings
 from .jwt_validator import JWTValidator
 from .logging import RequestIdMiddleware, configure_logging, get_logger
 from .proxy import router as proxy_router
+from .reauth import ReauthPublisher
 from .revocation import RevocationChecker
 
 logger = get_logger(__name__)
@@ -44,6 +45,11 @@ async def lifespan(app: FastAPI):
         dnsbl_cache_max=settings.revocation_dnsbl_cache_max,
         dnsbl_ttl_seconds=settings.revocation_dnsbl_ttl_seconds,
     )
+    app.state.reauth_publisher = ReauthPublisher(
+        sns_topic_arn=settings.reauth_sns_topic_arn,
+        sqs_queue_url=settings.reauth_sqs_queue_url,
+        aws_region=settings.reauth_aws_region,
+    )
     logger.info(
         "RIG started",
         extra={
@@ -51,6 +57,7 @@ async def lifespan(app: FastAPI):
             "max_connections": settings.max_connections,
             "jwt_validation_enabled": settings.jwt_validation.enabled,
             "revocation_enabled": app.state.revocation_checker.enabled,
+            "reauth_publish_enabled": app.state.reauth_publisher.enabled,
         },
     )
     yield

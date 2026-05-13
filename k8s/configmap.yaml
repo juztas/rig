@@ -26,3 +26,8 @@ data:
     host: "0.0.0.0"
     port: 8000
     workers: 4
+    # project_mappings:
+    #   a001:
+    #     nersc: "ns011"
+    #     alcf: "AmSC_Demos"
+    #     esnet-east: "proj01"

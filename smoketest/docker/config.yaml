@@ -13,6 +13,9 @@ port: 8000
 workers: 1
 
 vault_backend: docker
+project_mappings:
+  smoke:
+    echo: "echo-project"
 
 # JWT subject -> project (X-Project header) -> facility -> token
 docker_credentials:
