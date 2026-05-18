@@ -37,22 +37,25 @@ host: "0.0.0.0"
 port: 8000
 workers: 4
 
+# AmSC project → facility-native project/account identifier.
+# Used by rig to set X-IRI-Facility-Project on upstream requests.
+project_mappings:
+  smoke:
+    nersc: "ns011"
+    esnet-east: "proj01"
+    esnet-west: "proj01-west"
+    alcf: "AmSC_Demos"
+
 # Docker / local-testing credential store.
 # Set vault_backend: docker to enable. Tokens are looked up by user -> project -> facility.
 # vault_backend: docker
-# project_mappings:
-#   a001:
-#     nersc: "ns011"
-#     alcf: "AmSC_Demos"
-#     olcf: "olcf112"
-#     esnet-east: "proj01"
 # docker_credentials:
 #   alice:
-#     project1:
+#     smoke:
 #       nersc: "nersc_token_for_alice"
 #       esnet-east: "esnet_east_token_for_alice"
 #   bob:
-#     project2:
+#     smoke:
 #       nersc: "nersc_token_for_bob"
 
 # Optional enclave-aware Tier-3 overrides:
