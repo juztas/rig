@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir uv && \
     uv pip install --system -e .
 
 COPY config.yaml .
+COPY --chmod=755 healthcheck.sh .
 
 EXPOSE 8000
 
